@@ -1,0 +1,125 @@
+# Build a ready-to-install Instagram + InstaEclipse APK with LSPatch (no root)
+#
+# Inputs (all public, nothing secret):
+#   - InstaEclipse 0.8.2 module APK, from the official GitHub release
+#     Xposed-Modules-Repo/ps.reso.instaeclipse, tag 20-0.8.2-L
+#     (InstaEclipse-0.8.2.apk, 15,621,572 B, new Xposed API for LSPatch 1.0+)
+#   - LSPatch 1.0 CLI jar (lspatch-v1.0-455-release.jar, 12,092,952 B),
+#     from the official JingMatrix/LSPatch release, tag v1.0.
+#     CLI flags verified against LSPatch.java at tag v1.0:
+#       -m/--embed, --injectdex, -l/--sigbypasslv (0/1/2, default 0),
+#       -o/--output, -f/--force, -v/--verbose, -k/--keystore (4 args).
+#     The manager flow in InstaEclipse's README uses "Local Patch Mode" +
+#     "Inject loader dex", which is -m + --injectdex on the CLI.
+#     Sig bypass level 2 (pm+openat) is the documented choice for apps
+#     that verify their own signature (Instagram checks it on login).
+#   - Official Instagram 451.0.0.20.80 APK, downloaded from APKMirror
+#     (the version InstaEclipse 0.8.2 was tested on) by
+#     download_instagram.py, which follows APKMirror's normal web flow.
+#     The stock APK is NEVER committed to this repo.
+#
+# Secrets (same as build.yml):
+#   - TESTKEY_P12_B64 : base64 of the AOSP testkey PKCS#12 keystore
+#   - TESTKEY_PASSWORD: <redacted>
+#   The keystore and password NEVER appear in this repo, in logs, or in
+#   workflow files. LSPatch signs the output with this keystore via -k.
+#
+# Output: Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk
+#   (package com.instagram.android, testkey-signed, InstaEclipse embedded
+#   under assets/lspatch/modules/ps.reso.instaeclipse.apk).
+#   No glass bottom bar in this build — the base only. The glass bar is a
+#   separate custom module/patch, built after the base is phone-tested.
+
+name: Build Instagram + InstaEclipse (LSPatch)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Locate Android build-tools 34
+        run: |
+          ls "$ANDROID_HOME/build-tools"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/zipalign"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/aapt"
+          echo "BT=$ANDROID_HOME/build-tools/34.0.0" >> "$GITHUB_ENV"
+
+      - name: Download InstaEclipse 0.8.2 and LSPatch 1.0, verify sizes
+        run: |
+          curl -fL --retry 3 -o InstaEclipse-0.8.2.apk https://github.com/Xposed-Modules-Repo/ps.reso.instaeclipse/releases/download/20-0.8.2-L/InstaEclipse-0.8.2.apk
+          test "$(stat -c%s InstaEclipse-0.8.2.apk)" = "15621572"
+          curl -fL --retry 3 -o lspatch-v1.0-455-release.jar https://github.com/JingMatrix/LSPatch/releases/download/v1.0/lspatch-v1.0-455-release.jar
+          test "$(stat -c%s lspatch-v1.0-455-release.jar)" = "12092952"
+          sha256sum InstaEclipse-0.8.2.apk lspatch-v1.0-455-release.jar
+
+      - name: Show LSPatch CLI usage (flags on the exact jar)
+        run: java -jar lspatch-v1.0-455-release.jar --help
+
+      - name: Download official Instagram 451.0.0.20.80 from APKMirror
+        run: python3 download_instagram.py
+
+      - name: Verify stock Instagram APK
+        run: |
+          ls -la instagram-451.apk
+          "$BT/aapt" dump badging instagram-451.apk | head -3
+          "$BT/aapt" dump badging instagram-451.apk | grep -q "package: name='com.instagram.android'"
+          "$BT/aapt" dump badging instagram-451.apk | grep -q "versionName='451.0.0.20.80'"
+
+      - name: Patch with LSPatch (embed InstaEclipse, inject loader dex, sig bypass 2)
+        env:
+          TESTKEY_P12_B64: ${{ secrets.TESTKEY_P12_B64 }}
+          TESTKEY_PASSWORD: <redacted>
+        run: |
+          test -n "$TESTKEY_P12_B64"
+          test -n "$TESTKEY_PASSWORD"
+          echo "$TESTKEY_P12_B64" | base64 -d > testkey.p12
+          java -jar lspatch-v1.0-455-release.jar \
+            -m InstaEclipse-0.8.2.apk \
+            --injectdex \
+            -l 2 \
+            -k testkey.p12 "$TESTKEY_PASSWORD" testkey "$TESTKEY_PASSWORD" \
+            -o out -f -v instagram-451.apk 2>&1 | tee lspatch.log
+          rm -f testkey.p12
+          ls -la out/
+
+      - name: Verify patched APK
+        run: |
+          PATCHED="$(ls out/*-lspatched.apk | head -1)"
+          test -n "$PATCHED"
+          cp "$PATCHED" Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk
+          ls -la Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk
+          "$BT/aapt" dump badging Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk | head -3
+          "$BT/aapt" dump badging Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk | grep -q "package: name='com.instagram.android'"
+          "$BT/apksigner" verify --verbose --print-certs Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk
+          echo "--- embedded module ---"
+          unzip -l Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk | grep -i "lspatch/modules" || (echo "MODULE_NOT_EMBEDDED" && exit 1)
+          echo "--- zipalign (report only) ---"
+          "$BT/zipalign" -c -v 4 Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk || echo "ZIPALIGN_NOT_ALIGNED (install still works)"
+          echo "--- SHA-256 ---"
+          sha256sum Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: instagram-instaeclipse-451
+          path: |
+            Instagram-451.0.0.20.80-InstaEclipse-0.8.2-testkey.apk
+            lspatch.log
+          if-no-files-found: error
+          retention-days: 30
