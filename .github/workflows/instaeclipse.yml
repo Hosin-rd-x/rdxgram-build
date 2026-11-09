@@ -1,10 +1,17 @@
 # Build a ready-to-install Instagram + InstaEclipse APK with LSPatch (no root)
 #
-# Instagram source: Google Play, downloaded ANONYMOUSLY with goopdl 2.0.0
-# (no Google account, no password — tokens come from Aurora Store's public
-# dispenser). APKMirror is NOT used: it returns HTTP 403 (Cloudflare) to
-# automated requests, in the sandbox and in GitHub Actions alike
-# (run 42717570041); download_instagram.py is superseded and unused.
+# Instagram source: Google Play via goopdl 2.0.0.
+#   - Account mode (used when the repo secrets exist): env vars
+#     GOOPDL_ACCOUNT_EMAIL + GOOPDL_AAS_TOKEN (an `aas_et/...` token,
+#     obtained once with `goopdl auth login --print` — a browser sign-in,
+#     no password is ever typed into goopdl). goopdl then downloads
+#     without the token dispenser.
+#   - Anonymous mode (fallback): tokens from Aurora Store's public
+#     dispenser. VERIFIED 2026-11-10: the dispenser returns HTTP 403 for
+#     every device profile from GitHub Actions runners (run 42718937615)
+#     and is unreachable from the sandbox — anonymous is currently dead.
+# APKMirror is NOT used: it returns HTTP 403 (Cloudflare) to automated
+# requests (run 42717570041); download_instagram.py is superseded.
 # Play serves the NEWEST Instagram version, not 451 — the exact version
 # downloaded is recorded in the logs and in the output file name.
 # InstaEclipse 0.8.2 was tested on 451/452 and finds its targets with
@@ -96,8 +103,12 @@ jobs:
           fi
           goopdl --version
 
-      - name: Download Instagram from Google Play (anonymous)
+      - name: Download Instagram from Google Play (goopdl)
+        env:
+          GOOPDL_ACCOUNT_EMAIL: ${{ secrets.GOOPDL_ACCOUNT_EMAIL }}
+          GOOPDL_AAS_TOKEN: ${{ secrets.GOOPDL_AAS_TOKEN }}
         run: |
+          goopdl auth status || true
           goopdl latest com.instagram.android 2>&1 | tee latest.txt
           mkdir -p ig
           goopdl download com.instagram.android -a arm64 --splits -o ig 2>&1 | tee download.log
