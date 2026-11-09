@@ -1,0 +1,149 @@
+# Build InstaPro glass-final (RDX Gram) on GitHub Actions
+#
+# Reproduces the definitive glass-final build that was previously built on
+# Hossein's server, so future builds don't load his server (disk was 86%).
+#
+# Reference build (server, 2026-11-09):
+#   Morphe 2.1.0, --bytecode-mode FULL, bundle patches-0.6.0.mpp
+#   Morphe-signed:  InstaPro-15.90-glass-final.apk
+#                   183,192,752 B, SHA-256 f6d693cd47f4945c0170a44fe41d96dde4fd9a051b77e7f0db15367dde9f18b2
+#   Testkey twin:   InstaPro-15.90-glass-final-testkey.apk
+#                   183,192,752 B, SHA-256 246217a9eca8b5e0fb61f8c99d09e087bb7664c8316864bdf914cb5b80e9c538
+#                   (cert SHA-256 a40da80a... = stock InstaPro cert, installs over stock)
+#
+# Inputs (all public / in-repo, nothing secret):
+#   - stock InstaPro 15.90 APK, downloaded from https://shop.hosinrdx.ir/InstaPro-15.90.apk
+#     and SHA-256 verified (06f77692583257db911294fdac46682418c9331acbbb2a94ff7c5ed1b919edca).
+#     The stock APK is NEVER committed to this repo (180 MB, over GitHub's
+#     100 MB file limit, and a modded proprietary binary).
+#   - Morphe CLI 2.1.0 jar, downloaded from the MorpheApp/morphe-desktop
+#     GitHub release and SHA-256 verified against the jar used on the server.
+#   - patches-0.6.0.mpp, committed in this repo (prebuilt on the server:
+#     the Morphe Gradle plugin needs GitHub Packages auth for the
+#     MorpheApp registry, which is not available inside Actions).
+#     Patch source is in patches-src/ for reference (GlassNavPatch.kt.final).
+#
+# Secrets (set in repo Settings > Secrets and variables > Actions):
+#   - TESTKEY_P12_B64 : base64 of the AOSP testkey PKCS#12 keystore
+#   - TESTKEY_PASSWORD: the keystore password (same for store and key)
+#   The keystore and password NEVER appear in this repo, in logs, or in
+#   workflow files. The testkey is the public AOSP test key; its cert
+#   fingerprint is a40da80a59d170caa950cf15c18c454d47a39b26989d8b640ecd745ba71bf5dc.
+#
+# Expected verification profile of a correct build:
+#   zipalign -c -v 4 passes on both APKs; 18 dex files, no classes21.dex,
+#   no META-INF on the Morphe build; 183,253 classes; Uq1 and lpR exactly
+#   once each; manifest byte-identical to stock.
+#   NOTE: the Morphe-signed APK may differ in SHA from the server build:
+#   Morphe signs with a keystore it generates on first run, and the runner
+#   gets a fresh one (different cert than the server's e669bf94). Only the
+#   signature block differs. The testkey twin is re-signed with the SAME
+#   testkey, so it SHOULD be byte-identical to the server build
+#   (SHA 246217a9...) if the Morphe rebuild is deterministic. The workflow
+#   prints MATCH/DIFFERS banners for both SHAs; a differing testkey SHA
+#   means the rebuild was not byte-identical and needs the structural
+#   verification (dex count, class count, smali diff) instead.
+
+name: Build InstaPro glass-final
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Locate Android build-tools 34
+        run: |
+          ls "$ANDROID_HOME/build-tools"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/zipalign"
+          echo "BT=$ANDROID_HOME/build-tools/34.0.0" >> "$GITHUB_ENV"
+
+      - name: Download stock InstaPro 15.90 and verify SHA-256
+        run: |
+          curl -fL --retry 3 -o stock.apk https://shop.hosinrdx.ir/InstaPro-15.90.apk
+          test "$(stat -c%s stock.apk)" = "179921904"
+          echo "06f77692583257db911294fdac46682418c9331acbbb2a94ff7c5ed1b919edca  stock.apk" | sha256sum -c -
+
+      - name: Download Morphe CLI 2.1.0 and verify SHA-256
+        run: |
+          curl -fL --retry 3 -o morphe-desktop-2.1.0-all.jar https://github.com/MorpheApp/morphe-desktop/releases/download/v2.1.0/morphe-desktop-2.1.0-all.jar
+          test "$(stat -c%s morphe-desktop-2.1.0-all.jar)" = "47015693"
+          echo "30209993a9fed0c94a11dbd1020326b79b95adc1e8371b1356f8cb1d0f4cc313  morphe-desktop-2.1.0-all.jar" | sha256sum -c -
+
+      - name: Patch with Morphe (FULL mode)
+        run: |
+          java -jar morphe-desktop-2.1.0-all.jar patch \
+            -p patches-0.6.0.mpp \
+            -o instapro-glass-final.apk \
+            -r patch-report-glass-final.json \
+            --bytecode-mode FULL stock.apk 2>&1 | tee patch-glass-final.log
+          grep -q '"success":true' patch-report-glass-final.json
+
+      - name: Verify Morphe-signed APK
+        run: |
+          ls -la instapro-glass-final.apk
+          "$BT/zipalign" -c -v 4 instapro-glass-final.apk
+          "$BT/apksigner" verify --verbose --print-certs instapro-glass-final.apk
+          sha256sum instapro-glass-final.apk
+
+      - name: Re-sign testkey twin (installs over stock InstaPro)
+        env:
+          TESTKEY_P12_B64: ${{ secrets.TESTKEY_P12_B64 }}
+          TESTKEY_PASSWORD: ${{ secrets.TESTKEY_PASSWORD }}
+        run: |
+          test -n "$TESTKEY_P12_B64"
+          test -n "$TESTKEY_PASSWORD"
+          echo "$TESTKEY_P12_B64" | base64 -d > testkey.p12
+          cp instapro-glass-final.apk testkey-unsigned.apk
+          "$BT/apksigner" sign \
+            --ks testkey.p12 \
+            --ks-pass "pass:$TESTKEY_PASSWORD" \
+            --key-pass "pass:$TESTKEY_PASSWORD" \
+            --ks-key-alias testkey \
+            --v1-signing-enabled false \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out instapro-glass-final-testkey.apk testkey-unsigned.apk
+          rm -f testkey.p12 testkey-unsigned.apk
+
+      - name: Verify testkey twin and compare SHAs with the server build
+        run: |
+          ls -la instapro-glass-final-testkey.apk
+          "$BT/zipalign" -c -v 4 instapro-glass-final-testkey.apk
+          "$BT/apksigner" verify --verbose --print-certs instapro-glass-final-testkey.apk
+          echo "--- sizes ---"
+          stat -c '%n %s' instapro-glass-final.apk instapro-glass-final-testkey.apk
+          echo "--- SHA-256 ---"
+          sha256sum instapro-glass-final.apk instapro-glass-final-testkey.apk
+          echo "--- comparison with the server build ---"
+          if [ "$(sha256sum instapro-glass-final.apk | cut -d' ' -f1)" = "f6d693cd47f4945c0170a44fe41d96dde4fd9a051b77e7f0db15367dde9f18b2" ]; then echo "MORPHE_APK_SHA_MATCH"; else echo "MORPHE_APK_SHA_DIFFERS (expected: fresh Morphe keystore on the runner)"; fi
+          if [ "$(sha256sum instapro-glass-final-testkey.apk | cut -d' ' -f1)" = "246217a9eca8b5e0fb61f8c99d09e087bb7664c8316864bdf914cb5b80e9c538" ]; then echo "TESTKEY_TWIN_SHA_MATCH"; else echo "TESTKEY_TWIN_SHA_DIFFERS (needs structural verification)"; fi
+          # NOTE: no hard size gate here on purpose — even a differing build
+          # must still be uploaded so it can be structurally verified.
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: instapro-glass-final
+          path: |
+            instapro-glass-final.apk
+            instapro-glass-final-testkey.apk
+            patch-report-glass-final.json
+            patch-glass-final.log
+          if-no-files-found: error
+          retention-days: 30

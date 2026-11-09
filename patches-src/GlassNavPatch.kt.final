@@ -1,0 +1,268 @@
+package app.instapro.patches.glassnav
+
+import app.instapro.patches.shared.Constants.COMPATIBILITY_INSTAPRO
+import app.morphe.patcher.Fingerprint
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
+import app.morphe.patcher.extensions.InstructionExtensions.instructions
+import app.morphe.patcher.extensions.InstructionExtensions.removeInstructions
+import app.morphe.patcher.patch.PatchException
+import app.morphe.patcher.patch.bytecodePatch
+import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
+
+/**
+ * InstaPro 15.90 (base 439.0.0.38.89) floating glass tab bar — DEFINITIVE build (bundle 0.6.0, 2026-11-09).
+ * Synthesized from the ExpressAI + Kimi K3.1 Pro consultations: FULL-mode rebuild,
+ * flat bar, 80.0f px stroke, 30dp insets, Butt cap, 70% #CCCCCC. Based on the glass3
+ * source (Stage 2); only the color literal and the strokeWidth computation changed.
+ *
+ * What Stage 0/1 proved (dexdump of the real dex, not guesses):
+ * - The bar is the Compose composable LX/Uq1.A00 (classes14.dex). Its Modifier chain
+ *   is height(48dp) -> drawBehind(LX/lpR lambda, tag 17). There is NO BackgroundKt
+ *   call and no color constant in the composable; the theme color long
+ *   (LX/AtE.A0J -> LX/6WN.A17) is handed to the lpR lambda.
+ * - LX/lpR.invoke is a shared 55-case packed-switch lambda (classes15.dex).
+ *   $t=17 occurs at exactly ONE construction site (LX/Uq1.A00), so editing case 17
+ *   affects only the tab bar.
+ * - CORRECTION to the Stage 1 note: case 17 does NOT draw a rect. LX/5eO.B6L builds
+ *   a STROKE Paint (A03: F1=strokeWidth, F2=alpha, I1=StrokeCap, I2=BlendMode,
+ *   color long) and calls LX/Jmp;.B6M -> Canvas.drawLine(x1,y1,x2,y2,paint).
+ *   Case 17 draws a 1px hairline across the TOP of the bar (start (0,0), end
+ *   (width,0), strokeWidth 0.0f, cap Butt, blend SrcOver). That is why Stage 1
+ *   (which only recolored that line to 70% black) was invisible on the phone:
+ *   it recolored a 1-pixel divider.
+ * - LX/5eO.B6a IS drawRoundRect (unpacks topLeft/size/cornerRadius, calls
+ *   Jmp.B6Y). Its trailing longs are (topLeft, size, cornerRadius), first
+ *   component in the HIGH 32 bits. Pack convention everywhere: (first HIGH,
+ *   second LOW). Helpers verified by dumping them: Ola.HI5 = Density.toPx,
+ *   AtE.A0E(F)J = float bits in LOW 32, BRH.A08(F,J)J = (J.low32<<32)|F_bits,
+ *   177.A01(J)F = HIGH-32 float, nkb.DI6()J = DrawScope size (width HIGH,
+ *   height LOW). 7Ju.A01(J)F = min(abs(high),abs(low)) — NOT a low-32 extractor.
+ * - There are TWO lambdas calling both B6L and B6a: LX/lpR.invoke (classes15)
+ *   and LX/hvn.invoke (classes14). Only lpR.invoke contains the case-17
+ *   signature (a B6L whose backward window has const-wide/16 + BRH.A08), so
+ *   the patch selects by that signature, not by the fingerprint alone.
+ *
+ * Patch B (this file): keep B6L (drawLine) and turn the hairline into a thick
+ * line = a floating bar. No layout change, so taps are unaffected.
+ * - strokeWidth: 0.0f -> 80.0f px (~29dp; bar height ~29dp, ~9.5dp margins top/bottom
+ *   inside the 48dp bar, centered at y=24dp).
+ * - start: (0,0) -> (30dp, 24dp) in px; end: (width,0) -> (width-30dp, 24dp).
+ * - cap: Butt (0) — the ORIGINAL cap. Opus (glass3 review, 2026-11-08) said the
+ *   40dp Round capsule of glass2 cannot be proven to be the crash cause (the
+ *   most likely cause is a fresh-install transient, and glass v1 was never
+ *   fresh-install tested), and that changing constants is superstition; the ONE
+ *   defensible geometry change is Butt, the simplest cap for the Skia
+ *   rasterizer and the cap the original hairline already used. Round is the
+ *   single parameter most different from the original rendering path. So
+ *   glass3 is a thick FLAT bar (not a capsule): if it works, Round caps are a
+ *   one-byte change back (const/4 v6, 0x1) as the next step.
+ * - color (separate patch below, same bundle): 70% light gray #CCCCCC, visible against
+ *   the near-black background while white tab icons stay readable.
+ * The tab icons are drawn by separate composables on top of this drawBehind
+ * layer, centered in the 48dp bar, so they stay on top of the bar.
+ * Opus (Antigravity, 2026-11-07) reviewed this plan: B6L=drawLine confirmed,
+ * cap mapping confirmed, smali trace confirmed, Paint-caching safe (A03
+ * reinitializes strokeWidth/cap/blendMode on the cached Paint every call),
+ * drawBehind does not clip by default and the capsule is fully inside the
+ * 48dp bounds. Verdict: proceed with the 36dp endpoint fix (applied here).
+ * The B6L->B6a swap was rejected: B6a needs a different brush type (AF0 vs mtg)
+ * and its Paint path is STROKE via A03, so a solid capsule would need a FILL
+ * paint A03 does not provide; the thick round-capped line is simpler and exact.
+ */
+
+/** IgdsTabBar composable — anchor: the unique Compose source-info string. */
+private object IgdsTabBarFingerprint : Fingerprint(
+    strings = listOf(
+        "com.instagram.compose.igds.components.navigation.tabbar.IgdsTabBar (IgdsTabBar.kt:48)",
+    ),
+    returnType = "V",
+)
+
+/** Theme-color resolver for the bar: LX/AtE;->A0J(LX/mef;)J reads LX/6WN.A17. */
+private const val BAR_BACKGROUND_RESOLVER_CLASS = "LX/AtE;"
+private const val BAR_BACKGROUND_RESOLVER_NAME = "A0J"
+
+/**
+ * Capsule color as a Compose Color long: high 32 bits = 0xAARRGGBB, low 32 bits
+ * = color space (0 = sRGB). 0xB3 = 179/255, about 70% opaque; #CCCCCC light gray is
+ * visibly lighter than the near-black bar background, white icons stay readable.
+ */
+private const val CAPSULE_BAR_COLOR = -0x4C33333400000000L // == 0xB3CCCCCC00000000L unsigned
+
+private fun wideLiteral(value: Long): String = "0x${value.toULong().toString(16)}L"
+
+@Suppress("unused")
+val glassCapsuleColorPatch = bytecodePatch(
+    name = "Definitive glass bar color",
+    description = "Sets the InstaPro bottom tab bar draw color to a translucent gray " +
+        "(70% #CCCCCC) so the floating bar is visible against the dark background.",
+) {
+    compatibleWith(COMPATIBILITY_INSTAPRO)
+
+    execute {
+        val matches = IgdsTabBarFingerprint.matchAll(0..Int.MAX_VALUE)
+        val method = matches.singleOrNull()?.method
+            ?: throw PatchException(
+                "Expected exactly one IgdsTabBar composable, found ${matches.size}",
+            )
+        val instructions = method.instructions
+        // Find: invoke-static AtE.A0J(...)J immediately followed by move-result-wide.
+        val resolverIndex = instructions.withIndex().singleOrNull { (_, instruction) ->
+            instruction.opcode == Opcode.INVOKE_STATIC &&
+                ((instruction as? ReferenceInstruction)?.reference as? MethodReference)?.let { ref ->
+                    ref.definingClass == BAR_BACKGROUND_RESOLVER_CLASS &&
+                        ref.name == BAR_BACKGROUND_RESOLVER_NAME &&
+                        ref.returnType == "J"
+                } == true
+        }?.index ?: throw PatchException("IgdsTabBar does not call AtE.A0J")
+        val moveResult = instructions.getOrNull(resolverIndex + 1)
+            ?: throw PatchException("IgdsTabBar AtE.A0J call has no following instruction")
+        if (moveResult.opcode != Opcode.MOVE_RESULT_WIDE) {
+            throw PatchException(
+                "Expected move-result-wide after AtE.A0J, found ${moveResult.opcode}",
+            )
+        }
+        val register = (moveResult as? com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction)?.registerA
+            ?: throw PatchException("move-result-wide after AtE.A0J has no register")
+        method.addInstructions(
+            resolverIndex + 2,
+            "const-wide v$register, ${wideLiteral(CAPSULE_BAR_COLOR)}",
+        )
+    }
+}
+
+/**
+ * The shared draw lambda LX/lpR.invoke: the only method that calls BOTH
+ * B6L (drawLine) and B6a (drawRoundRect). It is a virtual method
+ * invoke(Ljava/lang/Object;)Ljava/lang/Object;.
+ */
+private object TabBarDrawLambdaFingerprint : Fingerprint(
+    name = "invoke",
+    returnType = "Ljava/lang/Object;",
+    parameters = listOf("Ljava/lang/Object;"),
+    custom = { method, _ ->
+        val names = method.implementation?.instructions?.mapNotNull { ins ->
+            ((ins as? ReferenceInstruction)?.reference as? MethodReference)?.name
+        }?.toSet() ?: emptySet()
+        "B6L" in names && "B6a" in names
+    },
+)
+
+/**
+ * New case-17 tail (replaces the 8 instructions from `const/4 v4, #0`
+ * through `const/4 v7, #3`, just before the B6L invoke-interface/range).
+ * Entry state: v0/v1 = AtE.A0E(width) long (kept prefix), v8/v9 = color long,
+ * v2 = DrawScope (also a Density). Scratch is v0/v1/v14/v15: none of them is
+ * read by the case-17 B6L call (it reads v2..v13); v8/v9 and v2 are never
+ * clobbered. The B6L invoke itself is untouched; it reads v2..v13 as before.
+ *
+ * TWO Morphe inline-smali constraints, both proven by compiling this exact
+ * string against the real method with the bundled compiler (harness kept at
+ * /tmp/compiler-test on the server):
+ * 1. const/high16 REQUIRES the full 32-bit literal (low 16 bits zeroed):
+ *    `const/high16 v14, 0x4220` is silently dropped. Use `const` with the
+ *    full float bits instead: `const v14, 0x42200000` (40.0f).
+ * 2. The compiler's dummy method only has 16 registers: any instruction
+ *    referencing v16+ is silently dropped (the parser logs "Invalid
+ *    register" but does NOT throw, leaving orphaned move-results behind —
+ *    invalid bytecode that would crash at runtime). Inserted code must use
+ *    ONLY v0-v15.
+ */
+private val CAPSULE_SMALI = """
+    const v4, 0x42A00000
+    const v14, 0x41f00000
+    invoke-interface {v2, v14}, LX/Ola;->HI5(F)F
+    move-result v14
+    const v15, 0x41c00000
+    invoke-interface {v2, v15}, LX/Ola;->HI5(F)F
+    move-result v15
+    invoke-static {v14}, LX/AtE;->A0E(F)J
+    move-result-wide v0
+    invoke-static {v15, v0, v1}, LX/BRH;->A08(FJ)J
+    move-result-wide v10
+    invoke-interface {v2}, LX/nkb;->DI6()J
+    move-result-wide v0
+    invoke-static {v0, v1}, LX/177;->A01(J)F
+    move-result v1
+    sub-float/2addr v1, v14
+    invoke-static {v1}, LX/AtE;->A0E(F)J
+    move-result-wide v0
+    invoke-static {v15, v0, v1}, LX/BRH;->A08(FJ)J
+    move-result-wide v12
+    const/4 v3, 0x0
+    const v5, 0x3f800000
+    const/4 v6, 0x0
+    const/4 v7, 0x3
+""".trimIndent()
+
+/**
+ * Finds case 17 in a draw lambda: the B6L (drawLine) call whose preceding
+ * ~16 instructions contain BOTH a const-wide/16 (the 0L start offset) and an
+ * invoke-static to BRH.A08. The other B6L (case 10) has neither: its start
+ * offset is a computed pack and it builds its longs with shl/and/or.
+ * Returns (replaceStart, replaceCount) for the 8-instruction setup range
+ * (from `const/4 #0` strokeWidth through `const/4 #3` blendMode), or null.
+ */
+private fun findCase17(
+    instructions: List<com.android.tools.smali.dexlib2.iface.instruction.Instruction>,
+): Pair<Int, Int>? {
+    val b6lIndices = instructions.withIndex().filter { (_, ins) ->
+        ins.opcode == Opcode.INVOKE_INTERFACE_RANGE &&
+            ((ins as? ReferenceInstruction)?.reference as? MethodReference)?.name == "B6L"
+    }.map { it.index }
+    for (bi in b6lIndices) {
+        val from = maxOf(0, bi - 16)
+        val window = instructions.subList(from, bi)
+        val hasWide16 = window.any { it.opcode == Opcode.CONST_WIDE_16 }
+        val a08Rel = window.indexOfLast { ins ->
+            ins.opcode == Opcode.INVOKE_STATIC &&
+                ((ins as? ReferenceInstruction)?.reference as? MethodReference)?.name == "A08"
+        }
+        if (!hasWide16 || a08Rel < 0) continue
+        val a08Index = from + a08Rel
+        // The instruction right before BRH.A08 must be const/4 (strokeWidth 0.0f).
+        if (a08Index - 1 < 0 || instructions[a08Index - 1].opcode != Opcode.CONST_4) continue
+        // The instruction right before the B6L invoke must be const/4 (blendMode 3).
+        if (instructions[bi - 1].opcode != Opcode.CONST_4) continue
+        val replaceStart = a08Index - 1
+        val replaceCount = bi - replaceStart
+        if (replaceCount != 8) continue
+        return replaceStart to replaceCount
+    }
+    return null
+}
+
+@Suppress("unused")
+val floatingGlassCapsulePatch = bytecodePatch(
+    name = "Definitive floating glass bottom navigation bar",
+    description = "Turns the tab bar's 1px top hairline into a thick flat line: " +
+        "an ~29dp floating bar (80.0f px stroke), 30dp side insets, " +
+        "centered in the 48dp bar. Butt cap (the original cap) per the Opus " +
+        "glass3 review. No layout change.",
+) {
+    compatibleWith(COMPATIBILITY_INSTAPRO)
+
+    execute {
+        val matches = TabBarDrawLambdaFingerprint.matchAll(0..Int.MAX_VALUE)
+        if (matches.isEmpty()) {
+            throw PatchException("No draw lambda calling B6L+B6a found")
+        }
+        // Two lambdas match the fingerprint (LX/lpR.invoke and LX/hvn.invoke);
+        // only one contains the case-17 signature. Select by that signature.
+        val candidates = matches.mapNotNull { match ->
+            val method = match.method
+            findCase17(method.instructions)?.let { (start, count) -> Triple(method, start, count) }
+        }
+        val (method, replaceStart, replaceCount) = candidates.singleOrNull()
+            ?: throw PatchException(
+                "Expected exactly one method with the case-17 signature, " +
+                    "found ${candidates.size}",
+            )
+        // Inserted code uses only v0-v15 (Morphe dummy-method limit), so no
+        // register-count bump is needed; the method already has 35.
+        method.removeInstructions(replaceStart, replaceCount)
+        method.addInstructions(replaceStart, CAPSULE_SMALI)
+    }
+}
