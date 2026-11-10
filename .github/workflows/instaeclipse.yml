@@ -1,22 +1,24 @@
 # Build a ready-to-install Instagram + InstaEclipse APK with LSPatch (no root)
 #
-# Instagram source: Google Play via goopdl 2.0.0.
-#   - Account mode (used when the repo secrets exist): env vars
-#     GOOPDL_ACCOUNT_EMAIL + GOOPDL_AAS_TOKEN (an `aas_et/...` token,
-#     obtained once with `goopdl auth login --print` — a browser sign-in,
-#     no password is ever typed into goopdl). goopdl then downloads
-#     without the token dispenser.
-#   - Anonymous mode (fallback): tokens from Aurora Store's public
-#     dispenser. VERIFIED 2026-11-10: the dispenser returns HTTP 403 for
-#     every device profile from GitHub Actions runners (run 42718937615)
-#     and is unreachable from the sandbox — anonymous is currently dead.
-# APKMirror is NOT used: it returns HTTP 403 (Cloudflare) to automated
-# requests (run 42717570041); download_instagram.py is superseded.
-# Play serves the NEWEST Instagram version, not 451 — the exact version
-# downloaded is recorded in the logs and in the output file name.
+# Instagram source: stock base APK supplied by Hossein, stored as a release
+#   asset in THIS private repo (tag instagram-451.0.0.53.80-stock).
+#   Hossein downloaded it himself from APKMirror on his phone (the 451
+#   build on the uploads list, 451.0.0.53.80) and sent it via Telegram
+#   Saved Messages (2026-11-10); only base.apk was extracted from the
+#   APKM bundle — it already carries lib/arm64-v8a, so no DPI splits
+#   are needed. Verified before upload: package com.instagram.android,
+#   versionName 451.0.0.53.80, versionCode 385713073, 135,927,053 B,
+#   SHA-256 9eff1efa4591d53f8d97631c67a381a26a01929e093f604b37aa69fdf443d628,
+#   apksigner verifies (Meta Platforms Inc., v3/v3.1).
+#   Why not the usual routes (all VERIFIED dead 2026-11-10):
+#   - APKMirror: HTTP 403 (Cloudflare) from Actions AND from Hossein's
+#     own server (run 42717570041 + server test).
+#   - APKPure: HTTP 403 (Cloudflare) the same way.
+#   - Play via goopdl anonymous: Aurora token dispenser 403 for every
+#     device profile (run 42718937615); account mode needs a real
+#     browser sign-in, which the sandbox has none of.
 # InstaEclipse 0.8.2 was tested on 451/452 and finds its targets with
-# DexKit, so a newer Play version is expected to work but is NOT
-# guaranteed — the phone test decides.
+# DexKit, so 451.0.0.53.80 is expected to work — the phone test decides.
 #
 # Split-APK note: Play delivers Instagram as base + config splits. The
 # workflow inspects whether the base APK already contains native libs.
@@ -37,8 +39,8 @@
 #     "Inject loader dex", which is -m + --injectdex on the CLI.
 #     Sig bypass level 2 (pm+openat) is the documented choice for apps
 #     that verify their own signature (Instagram checks it on login).
-#   - Official Instagram APK, latest from Google Play via goopdl 2.0.0
-#     (anonymous Aurora tokens). The stock APK is NEVER committed.
+#   - Official Instagram APK, the stock base APK supplied by Hossein,
+#     fetched from this repo's own release (see header comment).
 #
 # Secrets (same as build.yml):
 #   - TESTKEY_P12_B64 : base64 of the AOSP testkey PKCS#12 keystore
@@ -93,28 +95,18 @@ jobs:
       - name: Show LSPatch CLI usage (flags on the exact jar)
         run: java -jar lspatch-v1.0-455-release.jar --help
 
-      - name: Install goopdl 2.0.0 (anonymous Play downloader)
-        run: |
-          if command -v pipx >/dev/null 2>&1; then
-            pipx install 'goopdl==2.0.0'
-          else
-            python3 -m pip install --user -q 'goopdl==2.0.0'
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          goopdl --version
-
-      - name: Download Instagram from Google Play (goopdl)
+      - name: Download stock Instagram 451 base APK (from this repo's release)
         env:
-          GOOPDL_ACCOUNT_EMAIL: ${{ secrets.GOOPDL_ACCOUNT_EMAIL }}
-          GOOPDL_AAS_TOKEN: ${{ secrets.GOOPDL_AAS_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          goopdl auth status || true
-          goopdl latest com.instagram.android 2>&1 | tee latest.txt
           mkdir -p ig
-          goopdl download com.instagram.android -a arm64 --splits -o ig 2>&1 | tee download.log
-          echo "--- downloaded files ---"
-          find ig -type f | sort
-          du -sh ig
+          gh release download instagram-451.0.0.53.80-stock -p 'instagram-451.0.0.53.80.apk' --repo Hosin-rd-x/rdxgram-build --dir ig
+          echo "--- downloaded file ---"
+          ls -la ig/
+          sha256sum ig/instagram-451.0.0.53.80.apk
+          test "$(sha256sum ig/instagram-451.0.0.53.80.apk | cut -d' ' -f1)" = "9eff1efa4591d53f8d97631c67a381a26a01929e093f604b37aa69fdf443d628"
+          echo "stock Instagram 451.0.0.53.80 base APK, SHA-256 verified" | tee download.log
+          echo "Instagram 451.0.0.53.80 (stock base APK supplied by Hossein, release instagram-451.0.0.53.80-stock)" | tee latest.txt
 
       - name: Inspect downloaded APKs
         run: |
