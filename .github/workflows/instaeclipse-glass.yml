@@ -70,8 +70,9 @@ jobs:
           "$BT/aapt" dump badging "$MODULE_APK" | head -2
           "$BT/aapt" dump badging "$MODULE_APK" | grep -q "package: name='ps.reso.instaeclipse'"
           # The module MUST be the glass one: GlassTabBarHook class + glassTabBar flag inside.
-          unzip -p "$MODULE_APK" classes.dex | grep -q "ps/reso/instaeclipse/mods/ui/GlassTabBarHook" || (echo "GLASS_HOOK_MISSING" && exit 1)
-          unzip -p "$MODULE_APK" classes.dex | grep -q "glassTabBar" || (echo "GLASS_FLAG_MISSING" && exit 1)
+          # (Multi-dex APK: the class lives in classes3.dex, so grep ALL dex files.)
+          unzip -p "$MODULE_APK" 'classes*.dex' | grep -q "ps/reso/instaeclipse/mods/ui/GlassTabBarHook" || (echo "GLASS_HOOK_MISSING" && exit 1)
+          unzip -p "$MODULE_APK" 'classes*.dex' | grep -q "glassTabBar" || (echo "GLASS_FLAG_MISSING" && exit 1)
           echo "glass module verified: GlassTabBarHook + glassTabBar present"
 
       - name: Download LSPatch 1.0, verify size
@@ -159,8 +160,8 @@ jobs:
           unzip -o -j "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk" "assets/lspatch/modules/*" -d embedded-check
           EMBEDDED="$(ls embedded-check/*.apk | head -1)"
           test -n "$EMBEDDED"
-          unzip -p "$EMBEDDED" classes.dex | grep -q "ps/reso/instaeclipse/mods/ui/GlassTabBarHook" || (echo "EMBEDDED_GLASS_HOOK_MISSING" && exit 1)
-          unzip -p "$EMBEDDED" classes.dex | grep -q "glassTabBar" || (echo "EMBEDDED_GLASS_FLAG_MISSING" && exit 1)
+          unzip -p "$EMBEDDED" 'classes*.dex' | grep -q "ps/reso/instaeclipse/mods/ui/GlassTabBarHook" || (echo "EMBEDDED_GLASS_HOOK_MISSING" && exit 1)
+          unzip -p "$EMBEDDED" 'classes*.dex' | grep -q "glassTabBar" || (echo "EMBEDDED_GLASS_FLAG_MISSING" && exit 1)
           echo "embedded module verified: glass module inside the final APK"
           echo "--- zipalign (report only) ---"
           "$BT/zipalign" -c -v 4 "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk" || echo "ZIPALIGN_NOT_ALIGNED (install still works)"
