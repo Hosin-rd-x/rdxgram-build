@@ -44,7 +44,7 @@
 #
 # Secrets (same as build.yml):
 #   - TESTKEY_P12_B64 : base64 of the AOSP testkey PKCS#12 keystore
-#   - TESTKEY_PASSWORD: <redacted>
+#   - TESTKEY_PASSWORD: the keystore password (same for store and key)
 #   The keystore and password NEVER appear in this repo, in logs, or in
 #   workflow files. LSPatch signs the output with this keystore via -k.
 #
@@ -148,7 +148,7 @@ jobs:
         if: env.HAS_LIBS == 'true'
         env:
           TESTKEY_P12_B64: ${{ secrets.TESTKEY_P12_B64 }}
-          TESTKEY_PASSWORD: <redacted>
+          TESTKEY_PASSWORD: ${{ secrets.TESTKEY_PASSWORD }}
         run: |
           test -n "$TESTKEY_P12_B64"
           test -n "$TESTKEY_PASSWORD"
