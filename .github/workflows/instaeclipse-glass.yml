@@ -1,0 +1,181 @@
+# Build a ready-to-install Instagram + InstaEclipse GLASS APK with LSPatch (no root)
+#
+# Same base as instaeclipse.yml (stock Instagram 451.0.0.53.80 supplied by
+# Hossein, release instagram-451.0.0.53.80-stock, SHA-256 verified there),
+# but the embedded module is the GLASS fork instead of upstream 0.8.2:
+#   - Module source: Hosin-rd-x/InstaEclipse, branch rdx-glass
+#     (fork of ReSo7200/InstaEclipse 0.8.2 + GlassTabBarHook: floating
+#     translucent capsule bottom bar, iOS Instagram 454.1 look, switch
+#     "glassTabBar" default ON in the module's Navigation menu).
+#     Built by that repo's own workflow build-glass-module.yml
+#     (assembleDebug) — this workflow takes its latest successful
+#     artifact (glass-module-apk) and verifies it contains the
+#     GlassTabBarHook class before patching.
+#   - LSPatch 1.0 CLI jar, same as instaeclipse.yml.
+#
+# Secrets (same as instaeclipse.yml):
+#   - TESTKEY_P12_B64 / TESTKEY_PASSWORD (testkey keystore, never in logs)
+#
+# Output: Instagram-451.0.0.53.80-InstaEclipse-0.8.2-glass-testkey.apk
+#   (package com.instagram.android, testkey-signed, glass module embedded
+#   under assets/lspatch/modules/ps.reso.instaeclipse.apk).
+#   The glass bar itself is verified only by the phone test — this
+#   workflow verifies the module IS the glass one (class present) and
+#   the APK is well-formed and signed.
+
+name: Build Instagram + InstaEclipse GLASS (LSPatch)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Locate Android build-tools 34
+        run: |
+          ls "$ANDROID_HOME/build-tools"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/zipalign"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/aapt"
+          echo "BT=$ANDROID_HOME/build-tools/34.0.0" >> "$GITHUB_ENV"
+
+      - name: Download glass module APK (latest successful fork build)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID="$(gh api 'repos/Hosin-rd-x/InstaEclipse/actions/workflows/build-glass-module.yml/runs?branch=rdx-glass&status=success&per_page=1' --jq '.workflow_runs[0].id')"
+          test -n "$RUN_ID" && test "$RUN_ID" != "null"
+          echo "glass module run: $RUN_ID"
+          gh run download "$RUN_ID" -n glass-module-apk --repo Hosin-rd-x/InstaEclipse --dir glass-module
+          ls -la glass-module/
+          MODULE_APK="$(ls glass-module/*.apk | head -1)"
+          test -n "$MODULE_APK"
+          echo "MODULE_APK=$MODULE_APK" >> "$GITHUB_ENV"
+          ls -la "$MODULE_APK"
+          sha256sum "$MODULE_APK"
+          "$BT/aapt" dump badging "$MODULE_APK" | head -2
+          "$BT/aapt" dump badging "$MODULE_APK" | grep -q "package: name='ps.reso.instaeclipse'"
+          # The module MUST be the glass one: GlassTabBarHook class + glassTabBar flag inside.
+          unzip -p "$MODULE_APK" classes.dex | grep -q "ps/reso/instaeclipse/mods/ui/GlassTabBarHook" || (echo "GLASS_HOOK_MISSING" && exit 1)
+          unzip -p "$MODULE_APK" classes.dex | grep -q "glassTabBar" || (echo "GLASS_FLAG_MISSING" && exit 1)
+          echo "glass module verified: GlassTabBarHook + glassTabBar present"
+
+      - name: Download LSPatch 1.0, verify size
+        run: |
+          curl -fL --retry 3 -o lspatch-v1.0-455-release.jar https://github.com/JingMatrix/LSPatch/releases/download/v1.0/lspatch-v1.0-455-release.jar
+          test "$(stat -c%s lspatch-v1.0-455-release.jar)" = "12092952"
+          sha256sum lspatch-v1.0-455-release.jar
+
+      - name: Download stock Instagram 451 base APK (from this repo's release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ig
+          gh release download instagram-451.0.0.53.80-stock -p 'instagram-451.0.0.53.80.apk' --repo Hosin-rd-x/rdxgram-build --dir ig
+          ls -la ig/
+          sha256sum ig/instagram-451.0.0.53.80.apk
+          test "$(sha256sum ig/instagram-451.0.0.53.80.apk | cut -d' ' -f1)" = "9eff1efa4591d53f8d97631c67a381a26a01929e093f604b37aa69fdf443d628"
+          echo "stock Instagram 451.0.0.53.80 base APK, SHA-256 verified" | tee download.log
+
+      - name: Inspect downloaded APKs
+        run: |
+          for f in $(find ig -name '*.apk' | sort); do
+            echo "== $f ($(stat -c%s "$f") bytes)"
+            "$BT/aapt" dump badging "$f" 2>/dev/null | head -2 || true
+            echo "  dex files: $(unzip -l "$f" | grep -c 'classes[0-9]*\.dex' || true)"
+            echo "  arm64 .so entries: $(unzip -l "$f" | grep -c 'lib/arm64-v8a/[^ ]*\.so' || true)"
+          done
+          BASE_APK="$(for f in $(find ig -name '*.apk' | sort); do if unzip -l "$f" | grep -q 'classes[0-9]*\.dex'; then echo "$f"; break; fi; done)"
+          test -n "$BASE_APK"
+          echo "BASE_APK=$BASE_APK" >> "$GITHUB_ENV"
+          VERSION_NAME="$("$BT/aapt" dump badging "$BASE_APK" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1)"
+          VERSION_CODE="$("$BT/aapt" dump badging "$BASE_APK" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" | head -1)"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Downloaded Instagram $VERSION_NAME (code $VERSION_CODE)"
+          LIBS="$(unzip -l "$BASE_APK" | grep -c 'lib/arm64-v8a/[^ ]*\.so' || true)"
+          echo "Base APK native-lib entries: $LIBS"
+          if [ "$LIBS" -gt 0 ]; then
+            echo "HAS_LIBS=true" >> "$GITHUB_ENV"
+          else
+            echo "HAS_LIBS=false" >> "$GITHUB_ENV"
+            echo "BASE_HAS_NO_NATIVE_LIBS: base APK has no arm64 .so files; splits carry them."
+          fi
+          "$BT/aapt" dump badging "$BASE_APK" | grep -q "package: name='com.instagram.android'"
+          cp "$BASE_APK" instagram-play.apk
+          sha256sum instagram-play.apk
+
+      - name: Stop when base APK has no native libs
+        if: env.HAS_LIBS != 'true'
+        run: |
+          echo "BASE_HAS_NO_NATIVE_LIBS"
+          exit 1
+
+      - name: Patch with LSPatch (embed glass module, inject loader dex, sig bypass 2)
+        if: env.HAS_LIBS == 'true'
+        env:
+          TESTKEY_P12_B64: ${{ secrets.TESTKEY_P12_B64 }}
+          TESTKEY_PASSWORD: ${{ secrets.TESTKEY_PASSWORD }}
+        run: |
+          test -n "$TESTKEY_P12_B64"
+          test -n "$TESTKEY_PASSWORD"
+          echo "$TESTKEY_P12_B64" | base64 -d > testkey.p12
+          java -jar lspatch-v1.0-455-release.jar \
+            -m "$MODULE_APK" \
+            --injectdex \
+            -l 2 \
+            -k testkey.p12 "$TESTKEY_PASSWORD" testkey "$TESTKEY_PASSWORD" \
+            -o out -f -v instagram-play.apk 2>&1 | tee lspatch.log
+          rm -f testkey.p12
+          ls -la out/
+
+      - name: Verify patched APK
+        if: env.HAS_LIBS == 'true'
+        run: |
+          PATCHED="$(ls out/*-lspatched.apk | head -1)"
+          test -n "$PATCHED"
+          cp "$PATCHED" "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk"
+          ls -la "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk"
+          "$BT/aapt" dump badging "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk" | head -3
+          "$BT/aapt" dump badging "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk" | grep -q "package: name='com.instagram.android'"
+          "$BT/apksigner" verify --verbose --print-certs "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk"
+          echo "--- embedded module ---"
+          unzip -l "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk" | grep -i "lspatch/modules" || (echo "MODULE_NOT_EMBEDDED" && exit 1)
+          mkdir -p embedded-check
+          unzip -o -j "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk" "assets/lspatch/modules/*" -d embedded-check
+          EMBEDDED="$(ls embedded-check/*.apk | head -1)"
+          test -n "$EMBEDDED"
+          unzip -p "$EMBEDDED" classes.dex | grep -q "ps/reso/instaeclipse/mods/ui/GlassTabBarHook" || (echo "EMBEDDED_GLASS_HOOK_MISSING" && exit 1)
+          unzip -p "$EMBEDDED" classes.dex | grep -q "glassTabBar" || (echo "EMBEDDED_GLASS_FLAG_MISSING" && exit 1)
+          echo "embedded module verified: glass module inside the final APK"
+          echo "--- zipalign (report only) ---"
+          "$BT/zipalign" -c -v 4 "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk" || echo "ZIPALIGN_NOT_ALIGNED (install still works)"
+          echo "--- SHA-256 ---"
+          sha256sum "Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk"
+          echo "PATCHED_APK=Instagram-${VERSION_NAME}-InstaEclipse-0.8.2-glass-testkey.apk" >> "$GITHUB_ENV"
+
+      - name: Upload APK
+        if: env.HAS_LIBS == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: instagram-instaeclipse-glass
+          path: |
+            Instagram-*-InstaEclipse-0.8.2-glass-testkey.apk
+            lspatch.log
+            download.log
+          if-no-files-found: error
+          retention-days: 30
