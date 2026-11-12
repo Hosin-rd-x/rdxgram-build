@@ -1,0 +1,214 @@
+# Build a ready-to-install Instagram + RdxGram Theme APK with LSPatch (no root)
+#
+# Same base as instaeclipse.yml / instaeclipse-glass.yml (stock Instagram
+# 451.0.0.53.80 supplied by Hossein, release instagram-451.0.0.53.80-stock,
+# SHA-256 verified there), but the embedded module is the new standalone
+# RdxGram Theme module built from source in THIS repo (rdxgram-theme/):
+#   - Kotlin + legacy Xposed API only (api-82.jar, compileOnly), one entry
+#     (assets/xposed_init + META-INF/xposed/init, minVersion 82) — the
+#     smallest possible surface after the previous glass build crashed on
+#     the phone for an unknown reason.
+#   - Inter variable font (free, SIL OFL 1.1, google/fonts) bundled in the
+#     module; replaces only the system sans-serif family.
+#   - Floating translucent capsule bottom bar + selected-tab pill (ported
+#     GlassTabBarHook). NO real backdrop blur — a RenderEffect on the bar
+#     itself would blur the bar's own icons, not the backdrop; the look is
+#     a translucent capsule, and the release notes say so plainly.
+#   - Settings app (same APK, installable standalone) with two switches
+#     read through an exported read-only ContentProvider; defaults ON.
+#   - LSPatch 1.0 CLI jar, same as instaeclipse.yml.
+#
+# Secrets (same as instaeclipse.yml):
+#   - TESTKEY_P12_B64 / TESTKEY_PASSWORD (testkey keystore, never in logs)
+#
+# Output: Instagram-451.0.0.53.80-RdxGram-Theme-1.0-testkey.apk
+#   (package com.instagram.android, testkey-signed, RdxGram Theme module
+#   embedded under assets/lspatch/modules/ir.rdx.gram.theme.apk).
+#   The font and the bar themselves are verified only by the phone test —
+#   this workflow verifies the module IS the theme module (classes +
+#   font asset + xposed entries present) and the APK is well-formed
+#   and signed.
+#
+# Also uploads the standalone module APK (rdxgram-theme-1.0.apk) so the
+# settings app can be installed for the on/off switches.
+
+name: Build Instagram + RdxGram Theme (LSPatch)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Locate Android build-tools 34
+        run: |
+          ls "$ANDROID_HOME/build-tools"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/zipalign"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/aapt"
+          echo "BT=$ANDROID_HOME/build-tools/34.0.0" >> "$GITHUB_ENV"
+
+      - name: Ensure Android platform 34 (best effort)
+        run: |
+          if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || echo "sdkmanager install skipped (platform may already be present)"
+          else
+            echo "no sdkmanager; relying on the preinstalled SDK"
+          fi
+          ls "$ANDROID_HOME/platforms" || true
+
+      - name: Build RdxGram Theme module APK
+        run: |
+          cd rdxgram-theme
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon
+          ls -la app/build/outputs/apk/debug/
+          cp app/build/outputs/apk/debug/app-debug.apk ../rdxgram-theme-1.0.apk
+          cd ..
+          ls -la rdxgram-theme-1.0.apk
+          sha256sum rdxgram-theme-1.0.apk
+          "$BT/aapt" dump badging rdxgram-theme-1.0.apk | head -2
+          "$BT/aapt" dump badging rdxgram-theme-1.0.apk | grep -q "package: name='ir.rdx.gram.theme'"
+          echo "MODULE_APK=rdxgram-theme-1.0.apk" >> "$GITHUB_ENV"
+
+      - name: Verify theme module contents
+        run: |
+          unzip -l "$MODULE_APK" | grep -q "assets/fonts/Inter-Variable.ttf" || (echo "FONT_ASSET_MISSING" && exit 1)
+          unzip -l "$MODULE_APK" | grep -q "META-INF/xposed/module.prop" || (echo "MODULE_PROP_MISSING" && exit 1)
+          unzip -l "$MODULE_APK" | grep -q "META-INF/xposed/init" || (echo "XPOSED_INIT_META_MISSING" && exit 1)
+          unzip -l "$MODULE_APK" | grep -q "assets/xposed_init" || (echo "XPOSED_INIT_ASSET_MISSING" && exit 1)
+          unzip -p "$MODULE_APK" "assets/fonts/Inter-Variable.ttf" > /tmp/inter-check.ttf
+          test "$(sha256sum /tmp/inter-check.ttf | cut -d' ' -f1)" = "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031" || (echo "FONT_SHA_MISMATCH" && exit 1)
+          echo "font asset verified: Inter variable, SHA-256 matches"
+          # The module MUST be the theme one: entry + both hooks + settings classes.
+          unzip -p "$MODULE_APK" 'classes*.dex' | grep -q "ir/rdx/gram/theme/LegacyEntry" || (echo "ENTRY_MISSING" && exit 1)
+          unzip -p "$MODULE_APK" 'classes*.dex' | grep -q "ir/rdx/gram/theme/FontHook" || (echo "FONT_HOOK_MISSING" && exit 1)
+          unzip -p "$MODULE_APK" 'classes*.dex' | grep -q "ir/rdx/gram/theme/TabBarHook" || (echo "TABBAR_HOOK_MISSING" && exit 1)
+          unzip -p "$MODULE_APK" 'classes*.dex' | grep -q "ir/rdx/gram/theme/SettingsProvider" || (echo "SETTINGS_PROVIDER_MISSING" && exit 1)
+          unzip -p "$MODULE_APK" "META-INF/xposed/module.prop" | grep -q "minVersion=82" || (echo "MINVERSION_MISSING" && exit 1)
+          echo "theme module verified: entry + FontHook + TabBarHook + settings present"
+
+      - name: Download LSPatch 1.0, verify size
+        run: |
+          curl -fL --retry 3 -o lspatch-v1.0-455-release.jar https://github.com/JingMatrix/LSPatch/releases/download/v1.0/lspatch-v1.0-455-release.jar
+          test "$(stat -c%s lspatch-v1.0-455-release.jar)" = "12092952"
+          sha256sum lspatch-v1.0-455-release.jar
+
+      - name: Download stock Instagram 451 base APK (from this repo's release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ig
+          gh release download instagram-451.0.0.53.80-stock -p 'instagram-451.0.0.53.80.apk' --repo Hosin-rd-x/rdxgram-build --dir ig
+          ls -la ig/
+          sha256sum ig/instagram-451.0.0.53.80.apk
+          test "$(sha256sum ig/instagram-451.0.0.53.80.apk | cut -d' ' -f1)" = "9eff1efa4591d53f8d97631c67a381a26a01929e093f604b37aa69fdf443d628"
+          echo "stock Instagram 451.0.0.53.80 base APK, SHA-256 verified" | tee download.log
+
+      - name: Inspect downloaded APKs
+        run: |
+          for f in $(find ig -name '*.apk' | sort); do
+            echo "== $f ($(stat -c%s "$f") bytes)"
+            "$BT/aapt" dump badging "$f" 2>/dev/null | head -2 || true
+            echo "  dex files: $(unzip -l "$f" | grep -c 'classes[0-9]*\.dex' || true)"
+            echo "  arm64 .so entries: $(unzip -l "$f" | grep -c 'lib/arm64-v8a/[^ ]*\.so' || true)"
+          done
+          BASE_APK="$(for f in $(find ig -name '*.apk' | sort); do if unzip -l "$f" | grep -q 'classes[0-9]*\.dex'; then echo "$f"; break; fi; done)"
+          test -n "$BASE_APK"
+          echo "BASE_APK=$BASE_APK" >> "$GITHUB_ENV"
+          VERSION_NAME="$("$BT/aapt" dump badging "$BASE_APK" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1)"
+          VERSION_CODE="$("$BT/aapt" dump badging "$BASE_APK" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" | head -1)"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Downloaded Instagram $VERSION_NAME (code $VERSION_CODE)"
+          LIBS="$(unzip -l "$BASE_APK" | grep -c 'lib/arm64-v8a/[^ ]*\.so' || true)"
+          echo "Base APK native-lib entries: $LIBS"
+          if [ "$LIBS" -gt 0 ]; then
+            echo "HAS_LIBS=true" >> "$GITHUB_ENV"
+          else
+            echo "HAS_LIBS=false" >> "$GITHUB_ENV"
+            echo "BASE_HAS_NO_NATIVE_LIBS: base APK has no arm64 .so files; splits carry them."
+          fi
+          "$BT/aapt" dump badging "$BASE_APK" | grep -q "package: name='com.instagram.android'"
+          cp "$BASE_APK" instagram-play.apk
+          sha256sum instagram-play.apk
+
+      - name: Stop when base APK has no native libs
+        if: env.HAS_LIBS != 'true'
+        run: |
+          echo "BASE_HAS_NO_NATIVE_LIBS"
+          exit 1
+
+      - name: Patch with LSPatch (embed theme module, inject loader dex, sig bypass 2)
+        if: env.HAS_LIBS == 'true'
+        env:
+          TESTKEY_P12_B64: ${{ secrets.TESTKEY_P12_B64 }}
+          TESTKEY_PASSWORD: ${{ secrets.TESTKEY_PASSWORD }}
+        run: |
+          test -n "$TESTKEY_P12_B64"
+          test -n "$TESTKEY_PASSWORD"
+          echo "$TESTKEY_P12_B64" | base64 -d > testkey.p12
+          java -jar lspatch-v1.0-455-release.jar \
+            -m "$MODULE_APK" \
+            --injectdex \
+            -l 2 \
+            -k testkey.p12 "$TESTKEY_PASSWORD" testkey "$TESTKEY_PASSWORD" \
+            -o out -f -v instagram-play.apk 2>&1 | tee lspatch.log
+          rm -f testkey.p12
+          ls -la out/
+
+      - name: Verify patched APK
+        if: env.HAS_LIBS == 'true'
+        run: |
+          PATCHED="$(ls out/*-lspatched.apk | head -1)"
+          test -n "$PATCHED"
+          cp "$PATCHED" "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk"
+          ls -la "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk"
+          "$BT/aapt" dump badging "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" | head -3
+          "$BT/aapt" dump badging "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" | grep -q "package: name='com.instagram.android'"
+          "$BT/apksigner" verify --verbose --print-certs "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk"
+          echo "--- embedded module ---"
+          unzip -l "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" | grep -i "lspatch/modules" || (echo "MODULE_NOT_EMBEDDED" && exit 1)
+          mkdir -p embedded-check
+          unzip -o -j "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" "assets/lspatch/modules/*" -d embedded-check
+          EMBEDDED="$(ls embedded-check/*.apk | head -1)"
+          test -n "$EMBEDDED"
+          "$BT/aapt" dump badging "$EMBEDDED" | grep -q "package: name='ir.rdx.gram.theme'" || (echo "EMBEDDED_PACKAGE_MISMATCH" && exit 1)
+          unzip -p "$EMBEDDED" 'classes*.dex' | grep -q "ir/rdx/gram/theme/LegacyEntry" || (echo "EMBEDDED_ENTRY_MISSING" && exit 1)
+          unzip -p "$EMBEDDED" 'classes*.dex' | grep -q "ir/rdx/gram/theme/FontHook" || (echo "EMBEDDED_FONT_HOOK_MISSING" && exit 1)
+          unzip -p "$EMBEDDED" 'classes*.dex' | grep -q "ir/rdx/gram/theme/TabBarHook" || (echo "EMBEDDED_TABBAR_HOOK_MISSING" && exit 1)
+          unzip -p "$EMBEDDED" "assets/fonts/Inter-Variable.ttf" > /tmp/inter-embedded.ttf
+          test "$(sha256sum /tmp/inter-embedded.ttf | cut -d' ' -f1)" = "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031" || (echo "EMBEDDED_FONT_SHA_MISMATCH" && exit 1)
+          echo "embedded module verified: theme module + Inter font inside the final APK"
+          echo "--- zipalign (report only) ---"
+          "$BT/zipalign" -c -v 4 "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" || echo "ZIPALIGN_NOT_ALIGNED (install still works)"
+          echo "--- SHA-256 ---"
+          sha256sum "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk"
+          echo "PATCHED_APK=Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" >> "$GITHUB_ENV"
+
+      - name: Upload APKs
+        if: env.HAS_LIBS == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: instagram-rdxgram-theme
+          path: |
+            Instagram-*-RdxGram-Theme-1.0-testkey.apk
+            rdxgram-theme-1.0.apk
+            lspatch.log
+            download.log
+          if-no-files-found: error
+          retention-days: 30
