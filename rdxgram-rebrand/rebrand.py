@@ -140,6 +140,80 @@ def main():
                 f"(e.g. {removed[:3]!r}), kept {kept[0]}"
             )
 
+    # 2e. Prune dangling <public> entries: Instagram's resource shrinking
+    # strips some layout XML files but apktool still writes their names
+    # into res/values/public.xml, and aapt2 then fails the link with
+    # "no definition for declared symbol 'com.rdx.gram:layout/<name>'".
+    # (Side-by-side run 43136930351 failed exactly on 20 such layouts:
+    # ac_transition_top_banner, account_row, action_bar, ... — the
+    # previous run 43136423466 had failed one layer earlier on the
+    # layouts.xml items that 2d now removes.) A <public> entry is
+    # removed ONLY when no file on disk defines that resource, and
+    # only for purely file-based types (layout, drawable, mipmap, anim,
+    # animator, raw, xml, menu, font). Value-based types (string,
+    # style, dimen, id, attr, ...) live in values XMLs and are never
+    # touched. The freed IDs simply go unused: the stock APK's table
+    # also has no file behind them, so no live code path can inflate
+    # them, and the remaining ~29k entries keep their original IDs.
+    import glob as _glob2
+    public_path = os.path.join(decoded, "res", "values", "public.xml")
+    if os.path.isfile(public_path):
+        with open(public_path, "r", encoding="utf-8") as fh:
+            public_lines = fh.read().splitlines(keepends=True)
+        # layout names still defined by a kept @-reference item in
+        # values*/layouts.xml (after 2d) count as defined.
+        ref_layouts = set()
+        for lx in sorted(_glob2.glob(os.path.join(decoded, "res", "values*", "layouts.xml"))):
+            with open(lx, "r", encoding="utf-8") as fh:
+                for m in re.finditer(r'<item\s+type="layout"\s+name="([^"]+)"[^>]*>@', fh.read()):
+                    ref_layouts.add(m.group(1))
+        file_type_dirs = {
+            "layout": ("layout", (".xml",)),
+            "drawable": ("drawable", (".xml", ".png", ".jpg", ".jpeg", ".webp", ".9.png")),
+            "mipmap": ("mipmap", (".xml", ".png", ".jpg", ".jpeg", ".webp")),
+            "anim": ("anim", (".xml",)),
+            "animator": ("animator", (".xml",)),
+            "raw": ("raw", None),
+            "xml": ("xml", (".xml",)),
+            "menu": ("menu", (".xml",)),
+            "font": ("font", None),
+        }
+        public_re = re.compile(r'<public\s+type="([^"]+)"\s+name="([^"]+)"')
+        pruned = []
+        kept_lines = []
+        for line in public_lines:
+            m = public_re.search(line)
+            if not m or m.group(1) not in file_type_dirs:
+                kept_lines.append(line)
+                continue
+            rtype, rname = m.group(1), m.group(2)
+            if rtype == "layout" and rname in ref_layouts:
+                kept_lines.append(line)
+                continue
+            prefix, exts = file_type_dirs[rtype]
+            found = False
+            for d in _glob2.glob(os.path.join(decoded, "res", prefix + "*")):
+                if not os.path.isdir(d):
+                    continue
+                if exts is None:
+                    if any(os.path.isfile(os.path.join(d, f)) and os.path.splitext(f)[0] == rname for f in os.listdir(d)):
+                        found = True
+                        break
+                elif any(os.path.isfile(os.path.join(d, rname + e)) for e in exts):
+                    found = True
+                    break
+            if found:
+                kept_lines.append(line)
+            else:
+                pruned.append(rtype + "/" + rname)
+        if pruned:
+            with open(public_path, "w", encoding="utf-8") as fh:
+                fh.writelines(kept_lines)
+            changes.append(
+                "public.xml pruned %d dangling %s (e.g. %s)"
+                % (len(pruned), "entries", ", ".join(pruned[:5]))
+            )
+
     # 3. app_name in every values*/strings.xml
     app_name_files = []
     app_name_found = False
