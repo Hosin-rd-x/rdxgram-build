@@ -113,7 +113,7 @@ jobs:
           test "$(stat -c%s apktool_2.12.0.jar)" = "25925346"
           test "$(sha256sum apktool_2.12.0.jar | cut -d' ' -f1)" = "effb69dab2f93806cafc0d232f6be32c2551b8d51c67650f575e46c016908fdd"
           sha256sum lspatch-v1.0-455-release.jar apktool_2.12.0.jar
-          java -jar apktool_2.12.0.jar --version
+          java -jar apktool_2.12.0.jar version
 
       - name: Download stock Instagram 451 base APK (from this repo's release)
         env:
