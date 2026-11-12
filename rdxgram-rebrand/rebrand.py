@@ -52,8 +52,14 @@ def main():
     # 2a. provider authorities
     def fix_authorities(m):
         value = m.group(1)
-        if OLD_PKG in value:
-            new = value.replace(OLD_PKG, NEW_PKG)
+        new = None
+        if value.startswith(OLD_PKG):
+            new = NEW_PKG + value[len(OLD_PKG):]
+        elif value.startswith("com.instagram."):
+            new = NEW_PKG + value[len("com.instagram"):]
+        elif value.startswith("com.facebook."):
+            new = NEW_PKG + value[len("com.facebook"):]
+        if new is not None and new != value:
             changes.append("authority: " + value + " -> " + new)
             return 'android:authorities="' + new + '"'
         return m.group(0)
@@ -101,6 +107,38 @@ def main():
 
     with open(manifest_path, "w", encoding="utf-8") as fh:
         fh.write(manifest)
+
+    # 2d. Sanitize values*/layouts.xml: apktool decodes some <item
+    # type="layout"> entries to non-reference values (dead entries whose
+    # layout file was stripped by Instagram's resource shrinking) and
+    # aapt2 refuses them ("invalid value for type 'layout'. Expected a
+    # reference"). Remove those items; entries with a real @reference
+    # value are kept. Report what the invalid values looked like.
+    import glob as _glob
+    layout_item_re = re.compile(
+        r'<item\s+type="layout"[^>]*>(.*?)</item>', re.DOTALL
+    )
+    for lx in sorted(_glob.glob(os.path.join(decoded, "res", "values*", "layouts.xml"))):
+        with open(lx, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        removed = []
+        kept = [0]
+        def _fix(m):
+            val = m.group(1).strip()
+            if val.startswith("@"):
+                kept[0] += 1
+                return m.group(0)
+            removed.append(val[:80])
+            return ""
+        new_content = layout_item_re.sub(_fix, content)
+        if removed:
+            with open(lx, "w", encoding="utf-8") as fh:
+                fh.write(new_content)
+            changes.append(
+                f"layouts sanitize {os.path.relpath(lx, decoded)}: "
+                f"removed {len(removed)} non-reference layout items "
+                f"(e.g. {removed[:3]!r}), kept {kept[0]}"
+            )
 
     # 3. app_name in every values*/strings.xml
     app_name_files = []
