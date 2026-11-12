@@ -25,13 +25,15 @@ class LegacyEntry : IXposedHookLoadPackage {
 
 /** Shared bootstrap: installs the (few) hooks once, only in Instagram. */
 object RdxGramTheme {
-    private const val TARGET_PACKAGE = "com.instagram.android"
+    // Stock Instagram, plus its side-by-side twin (same app, renamed
+    // package com.rdx.gram so it installs next to the official app).
+    private val TARGET_PACKAGES = setOf("com.instagram.android", "com.rdx.gram")
 
     @Volatile
     private var hooked = false
 
     fun hook(packageName: String) {
-        if (packageName != TARGET_PACKAGE) return
+        if (packageName !in TARGET_PACKAGES) return
         if (hooked) return
         hooked = true
         try {
