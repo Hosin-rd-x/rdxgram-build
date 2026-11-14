@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Verify the layout indirection table of a (re)built RdxGram APK.
+
+Why this exists: stock Instagram 451 stores its layouts as string
+values in resources.arsc — 6,049 layout entries, every one a value
+that is either a file path ("res/2mw.xml") or an indirection code
+("L|215F2C|958|AC99"). At launch the app's own inflater calls
+getString() on the layout id and the returned code tells it which
+real layout to inflate. A rebuild that drops those codes (what
+rebrand v1 did) keeps only ~66 layouts and launch dies with
+NotFoundException: String resource ID #0x7f0e0949 (Redroid run
+43600558276). This script reads resources.arsc with the standard
+library only and asserts, for a rebuilt or LSPatch-patched APK:
+
+  - layout entry 0x7f0e0949 (layout_activity_main_coordinator_layout)
+    is present and getString() resolves it to a value starting "L|"
+    (in a rebuilt APK the value is reached through a @string
+    reference to the rdx_layout_* string rebrand.py stored the code
+    in, so the check follows one reference hop);
+  - at least 6,000 layout entries are present (stock: 6,049);
+  - at least 5,900 of them resolve to "L|..." codes (stock: 5,988);
+  - the app label string 0x7f130009 resolves to "Rdx gram";
+  - attr 0x7f040d3e (tabBarHeight) is present;
+  - the Play-split dimension repairs (rebrand step 2i) are present
+    as literal dimensions in their styles: Base.Theme.Instagram
+    tabBarHeight = 48dp, Avatar strokeWidth = 2px, BaseNightTheme
+    and Theme.Instagram mediaViewOuterVerticalMargin = 6dp.
+
+Usage: verify_layout_values.py <apk>
+Exits 0 when every check passes, 1 otherwise.
+"""
+import struct
+import sys
+import zipfile
+import collections
+
+
+def _u16(b, o):
+    return struct.unpack_from("<H", b, o)[0]
+
+
+def _u32(b, o):
+    return struct.unpack_from("<I", b, o)[0]
+
+
+class _StringPool:
+    def __init__(self, data, off):
+        self.utf8 = bool(_u32(data, off + 16) & 0x100)
+        self.count = _u32(data, off + 8)
+        self.strings_start = _u32(data, off + 20)
+        self.off = off
+        self.data = data
+        self.offsets = [
+            _u32(data, off + 28 + 4 * i) for i in range(self.count)
+        ]
+
+    def get(self, idx):
+        if idx >= self.count:
+            return None
+        o = self.off + self.strings_start + self.offsets[idx]
+        if self.utf8:
+            b0 = self.data[o]
+            if b0 & 0x80:
+                ln = ((b0 & 0x7F) << 8) | self.data[o + 1]
+                o += 2
+            else:
+                ln = b0
+                o += 1
+            b1 = self.data[o]
+            o += 2 if b1 & 0x80 else 1
+            return self.data[o:o + ln].decode("utf-8", "replace")
+        ln = _u16(self.data, o)
+        if ln & 0x8000:
+            ln = ((ln & 0x7FFF) << 16) | _u16(self.data, o + 2)
+            o += 4
+        else:
+            o += 2
+        return self.data[o:o + ln * 2].decode("utf-16-le", "replace")
+
+
+def parse_arsc(arsc):
+    """Return (main_string_pool, entries, style_bags) where entries maps
+    (type_id, entry_id) -> (type_name, key_name, data_type, data), and
+    style_bags maps (style type_id, style entry_id) -> a list of
+    (attr_res_id, data_type, data) for the style's bag items."""
+    main_sp = None
+    entries = {}
+    style_bags = {}
+    off = 12  # skip ResTable_header
+    while off < len(arsc):
+        ctype = _u16(arsc, off)
+        csize = _u32(arsc, off + 4)
+        if csize == 0:
+            break
+        if ctype == 0x0001 and main_sp is None:
+            main_sp = _StringPool(arsc, off)
+        elif ctype == 0x0200:  # ResTable_package
+            hdr = _u16(arsc, off + 2)
+            type_sp = _StringPool(arsc, off + _u32(arsc, off + hdr - 20))
+            key_sp = _StringPool(arsc, off + _u32(arsc, off + hdr - 12))
+            poff = off + hdr
+            while poff < off + csize:
+                ttype = _u16(arsc, poff)
+                tsize = _u32(arsc, poff + 4)
+                if tsize == 0:
+                    break
+                if ttype == 0x0201:  # ResTable_type
+                    tid = arsc[poff + 8]
+                    entry_count = _u32(arsc, poff + 12)
+                    entries_start = _u32(arsc, poff + 16)
+                    header_size = _u16(arsc, poff + 2)
+                    tname = type_sp.get(tid - 1)
+                    for eid in range(entry_count):
+                        o = _u32(arsc, poff + header_size + 4 * eid)
+                        if o == 0xFFFFFFFF:
+                            continue
+                        key = (tid, eid)
+                        if key in entries:
+                            continue
+                        eo = poff + entries_start + o
+                        kidx = _u32(arsc, eo + 4)
+                        flags = _u16(arsc, eo + 2)
+                        if flags & 1:  # complex: a bag (style map)
+                            count = _u32(arsc, eo + 12)
+                            items = []
+                            for i in range(count):
+                                mo = eo + 16 + i * 12
+                                aname = _u32(arsc, mo)
+                                mdtype = arsc[mo + 7]
+                                mvdata = _u32(arsc, mo + 8)
+                                items.append((aname, mdtype, mvdata))
+                            style_bags[key] = items
+                            dtype, vdata = None, None
+                        else:
+                            dtype = arsc[eo + 11]
+                            vdata = _u32(arsc, eo + 12)
+                        entries[key] = (
+                            tname, key_sp.get(kidx), dtype, vdata,
+                        )
+                poff += tsize
+        off += csize
+    return main_sp, entries, style_bags
+
+
+# Android complex dimension decoding (Res_value TYPE_DIMENSION):
+# data = mantissa<<8 | radix<<4 | unit; value = mantissa * RADIX[radix].
+_DIM_RADIX = [1.0, 1.0 / 256, 1.0 / 65536, 1.0 / 16777216]
+_DIM_UNITS = {0: "px", 1: "dp", 2: "sp", 3: "pt", 4: "in", 5: "mm"}
+
+
+def decode_dimension(data):
+    unit = data & 0xF
+    radix = (data >> 4) & 0x3
+    mantissa = data >> 8
+    if mantissa & 0x800000:
+        mantissa -= 0x1000000
+    return mantissa * _DIM_RADIX[radix], _DIM_UNITS.get(unit, "?")
+
+
+def resolve(entries, main_sp, tid, eid, depth=0):
+    """getString() semantics for one entry: a plain string value is
+    returned as-is; a reference is followed one hop."""
+    e = entries.get((tid, eid))
+    if e is None:
+        return None
+    _tname, _kname, dtype, data = e
+    if dtype == 0x03:  # TYPE_STRING
+        return main_sp.get(data)
+    if dtype == 0x01 and depth < 3:  # TYPE_REFERENCE
+        return resolve(entries, main_sp, (data >> 16) & 0xFF,
+                       data & 0xFFFF, depth + 1)
+    return None
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("usage: verify_layout_values.py <apk>")
+        return 2
+    path = sys.argv[1]
+    with zipfile.ZipFile(path) as zf:
+        arsc = zf.read("resources.arsc")
+    main_sp, entries, style_bags = parse_arsc(arsc)
+    per_type = collections.Counter(v[0] for v in entries.values())
+    layout_entries = [v for k, v in entries.items() if k[0] == 0x0E]
+    layout_codes = sum(
+        1 for k, v in entries.items()
+        if k[0] == 0x0E
+        and (resolve(entries, main_sp, k[0], k[1]) or "").startswith("L|")
+    )
+    main_layout = resolve(entries, main_sp, 0x0E, 0x0949)
+    label = resolve(entries, main_sp, 0x13, 0x0009)
+    print(f"total entries: {len(entries)}")
+    print(f"layout entries: {len(layout_entries)} "
+          f"(resolving to 'L|...' codes: {layout_codes})")
+    print(f"0x7f0e0949 layout_activity_main_coordinator_layout -> "
+          f"{main_layout!r}")
+    print(f"0x7f130009 label -> {label!r}")
+    print(f"0x7f040d3e attr/tabBarHeight present: "
+          f"{(0x04, 0x0D3E) in entries}")
+    print(f"per-type counts: {dict(per_type)}")
+
+    # The Play-split dimension repairs (rebrand step 2i): the style
+    # items must hold real dimensions, not a dangling reference.
+    # style (type 0x14) name -> {attr name: (value, unit)}
+    style_attrs = {}
+    for (tid, eid), items in style_bags.items():
+        tname, sname, _d, _v = entries[(tid, eid)]
+        if tname != "style":
+            continue
+        attrs = {}
+        for aname, mdtype, mvdata in items:
+            attr_entry = entries.get(((aname >> 16) & 0xFF, aname & 0xFFFF))
+            attr_name = attr_entry[1] if attr_entry else None
+            if mdtype == 0x05:  # TYPE_DIMENSION
+                value, unit = decode_dimension(mvdata)
+                attrs[attr_name] = (value, unit)
+            elif mdtype == 0x01:  # TYPE_REFERENCE
+                attrs[attr_name] = ("ref", hex(mvdata))
+            else:
+                attrs[attr_name] = (f"type {mdtype:#x}", mvdata)
+        style_attrs[sname] = attrs
+    repairs = [
+        ("Base.Theme.Instagram", "tabBarHeight", 48.0, "dp"),
+        ("Avatar", "strokeWidth", 2.0, "px"),
+        ("BaseNightTheme", "mediaViewOuterVerticalMargin", 6.0, "dp"),
+        ("Theme.Instagram", "mediaViewOuterVerticalMargin", 6.0, "dp"),
+    ]
+    repair_values = {}
+    for style_name, attr_name, _want, _unit in repairs:
+        got = style_attrs.get(style_name, {}).get(attr_name)
+        repair_values[(style_name, attr_name)] = got
+        print(f"split repair {style_name}/{attr_name} -> {got!r}")
+
+    failures = []
+    if main_layout is None or not main_layout.startswith("L|"):
+        failures.append(
+            "MAIN_LAYOUT_CODE_MISSING: 0x7f0e0949 does not resolve to "
+            f"an 'L|...' code (got {main_layout!r}) — the app will die "
+            "at launch with NotFoundException for this id"
+        )
+    if len(layout_entries) < 6000:
+        failures.append(
+            f"LAYOUT_COUNT_LOW: {len(layout_entries)} layout entries "
+            "(stock: 6049) — the layout indirection table was pruned"
+        )
+    if layout_codes < 5900:
+        failures.append(
+            f"LAYOUT_CODES_LOW: {layout_codes} layouts resolve to "
+            "'L|...' codes (stock: 5988)"
+        )
+    if label != "Rdx gram":
+        failures.append(f"LABEL_WRONG: 0x7f130009 resolves to {label!r}")
+    if (0x04, 0x0D3E) not in entries:
+        failures.append("ATTR_TABBARHEIGHT_MISSING: 0x7f040d3e absent")
+    for style_name, attr_name, want, unit in repairs:
+        got = repair_values[(style_name, attr_name)]
+        if got is None or got != (want, unit):
+            failures.append(
+                f"SPLIT_REPAIR_WRONG: {style_name}/{attr_name} is "
+                f"{got!r}, expected ({want}, {unit!r}) — the base APK "
+                "is missing this Play-split dimension and launch will "
+                "fail resolving it"
+            )
+    if failures:
+        for f in failures:
+            print(f)
+        return 1
+    print("LAYOUT_VALUES_OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

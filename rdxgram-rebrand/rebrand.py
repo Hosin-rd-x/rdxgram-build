@@ -4,43 +4,85 @@
 Usage: rebrand.py <decoded-dir> <icons-dir>
 
 What it does (only these, nothing else):
-  1. Manifest package: com.instagram.android -> com.rdx.gram
-  2. Provider authorities and custom permissions that start with the old
-     package -> same suffix under com.rdx.gram (so the twin does not clash
-     with the official app's providers/permissions on the same phone).
-     Class names in android:name are NEVER touched.
-     2d. prune dead (non-reference) <item type="layout"> entries from
-     values*/layouts.xml; 2e. prune dangling <public> entries for
-     file-based types with no file on disk; 2f. prune dangling
-     @layout refs inside values*/styles.xml (run 43155415001 failed
-     exactly on those 10 layouts); 2h. prune dangling @layout refs
-     inside res/layout*/menu*/xml* files (<include> elements and
-     *layout attributes) and <item>@layout</item> in other values
-     XMLs (the run after 2f failed exactly on 18 such layouts from
-     3 layout files — aapt2 reports only the first ~20 errors, so
-     each fix reveals the next batch). 2g. launcher label, literal
-     "Rdx gram" in the manifest (see below).
-  3. Label string value in every res/values*/strings.xml: IG 451 has
-     NO app_name string — the label is a shrunk string whose public.xml
+
+  A. Manifest (steps 1 / 2a-2c / 2g): package com.instagram.android ->
+     com.rdx.gram; provider authorities and custom permissions that
+     start with the old package -> same suffix under com.rdx.gram
+     (so the twin does not clash with the official app's providers /
+     permissions on the same phone). Class names in android:name are
+     NEVER touched. Launcher label, literal "Rdx gram" (2g).
+
+  B. Layout value indirection — the part that decides whether the app
+     launches (steps 2d / 2d2 / 2e). Stock Instagram 451 does NOT store
+     its layouts as files: resources.arsc holds 6,049 layout entries
+     and EVERY one is a string value — either a file path
+     ("res/2mw.xml") or an indirection code ("L|215F2C|958|AC99").
+     At launch the app's own inflater (X.03wi.getLayout) calls
+     getString() on the layout id and the returned code tells it which
+     real layout to inflate — the main activity's layout
+     (0x7f0e0949 layout_activity_main_coordinator_layout) is the code
+     "L|215F2C|958|AC99". apktool decodes those codes into
+     res/values*/layouts.xml as <item type="layout">L|...</item>, and
+     aapt2 refuses a non-reference value for a layout item ("invalid
+     value for type 'layout'. Expected a reference"). v1 of this script
+     DELETED all ~5,988 such items, and pruned their public.xml
+     entries too — the rebuilt APK kept only 66 layouts, and launch
+     died with NotFoundException: String resource ID #0x7f0e0949
+     (Redroid run 43600558276). So 2d now KEEPS every code: the item
+     becomes <item type="layout">@string/rdx_layout_<name></item> and
+     the code itself is stored as that string resource (2d2, same
+     config as the layouts.xml it came from) — getString() follows
+     the reference and returns the exact original code, with the
+     original resource id unchanged. 2e never prunes a <public> entry
+     for a resource that is defined in a values XML (layouts.xml or
+     any other), only for file-based types with neither a file nor a
+     values definition on disk.
+
+  C. Dangling @layout references (steps 2f / 2h): only references to
+     a layout that has NO file AND NO layouts.xml item are removed
+     (from styles.xml, other values XMLs, and <include> / *layout
+     attributes in layout/menu/xml files). A layout that exists as a
+     layouts.xml item (a kept "L|..." code) counts as defined and its
+     references are kept — removing them would break the inflation
+     the app itself performs.
+
+  D2. Play-split holes (step 2i): the stock APK is only the BASE apk
+     of a Play bundle (it declares requiredSplitTypes='base__density'),
+     and a few resources live only in a config split, so their slots
+     in the base resources.arsc are holes. Three of them are
+     dimensions the launch theme needs, and their style items decode
+     as @null — the first one kills launch on ANY sideloaded base
+     build (stock included, Redroid run 43603677487): the main
+     layout's tab bar and container margins use ?tabBarHeight, and
+     Base.Theme.Instagram defines it as a reference to dimen
+     0x7f070263, which is absent, so TypedArray.getDimensionPixelSize
+     throws "Failed to resolve attribute ... 0x7f040d3e". 2i repairs
+     the three dimension holes with literal values taken from the
+     matching style/attribute/dimen mapping in the full InstaPro
+     439 APK (same codebase lineage, complete resources):
+     Base.Theme.Instagram tabBarHeight = 48.0dip
+     (@dimen/tab_bar_height_panorama there), Avatar strokeWidth =
+     2.0px (@dimen/circular_avatar_stroke_width), BaseNightTheme and
+     Theme.Instagram mediaViewOuterVerticalMargin = 6.0dip
+     (@dimen/direct_in_thread_composer_top_margin). If a listed
+     repair is not found in the decoded tree the script fails —
+     a build without it cannot launch.
+
+  D. Label string value (step 3): the shrunk label string's value in
+     every res/values*/strings.xml becomes "Rdx gram" (belt-and-
+     suspenders for the literal manifest labels of 2g). IG 451 has NO
+     app_name string — the label is a shrunk string whose public.xml
      name is "(name removed)" (id 0x7f130009) and whose value is
-     "Instagram". Rewrite that value to "Rdx gram" (belt-and-suspenders
-     for the literal manifest labels of 2g); an app_name entry, if it
-     ever exists, is rewritten too.
-  4. Launcher icons: IG 451 has NO ic_launcher.png at all — the app
-     icon is @mipmap/icon (a PNG per density + an adaptive-icon XML
-     in the anydpi config whose background/foreground are
-     ig_launcher_background / ig_launcher_foreground and whose
-     monochrome layer is IG's own glyph). Copies the pre-baked PNGs
-     from <icons-dir> over the decoded res/mipmap-* files:
-     ic_launcher.png -> icon.png, ig_launcher_background.png,
-     ig_launcher_foreground.png, and internal_icon (icon of the
-     disabled InternalLauncher alias) in its stock per-density format
-     (webp mdpi/hdpi/xhdpi, png xxhdpi/xxxhdpi).
-  5. Adaptive icon XMLs (res/mipmap-*/icon.xml): strip the
-     <monochrome .../> element so a themed launcher falls back to the
-     normal icon instead of IG's glyph. Legacy removal of
-     ic_launcher.xml / ic_launcher_round.xml in mipmap-anydpi-v26
-     is kept.
+     "Instagram".
+
+  E. Launcher icons (steps 4 / 5): IG 451 has NO ic_launcher.png —
+     the app icon is @mipmap/icon (a PNG per density + an
+     adaptive-icon XML in the anydpi config whose background /
+     foreground are ig_launcher_background / ig_launcher_foreground
+     and whose monochrome layer is IG's own glyph). Copies the
+     pre-baked PNGs from <icons-dir> over the decoded
+     res/mipmap-* files; strips <monochrome/> from the adaptive-icon
+     XMLs so a themed launcher falls back to the normal icon.
 
 NOTE: the workflow strips requiredSplitTypes from the stock APK
 _before_ apktool decodes it (see strip_required_splits.py) — the
@@ -62,6 +104,65 @@ import sys
 OLD_PKG = "com.instagram.android"
 NEW_PKG = "com.rdx.gram"
 APP_NAME = "Rdx gram"
+
+
+def _xml_escape(text):
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+
+
+def _value_defined_items(decoded):
+    """{type: {names}} defined by <item type=... name=...> in
+    res/values*/*.xml, excluding public.xml itself (it declares ids,
+    it does not define values). A name listed here is a real
+    definition aapt2 can link against, even when no file backs it."""
+    defined = {}
+    import glob as _g
+
+    item_open_re = re.compile(r"<item\b[^>]*>")
+    for vx in _g.glob(os.path.join(decoded, "res", "values*", "*.xml")):
+        if os.path.basename(vx) == "public.xml":
+            continue
+        with open(vx, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        for tag in item_open_re.findall(text):
+            tm = re.search(r'\btype="([^"]+)"', tag)
+            nm = re.search(r'\bname="([^"]+)"', tag)
+            if tm and nm:
+                defined.setdefault(tm.group(1), set()).add(nm.group(1))
+    return defined
+
+
+def _layout_names_defined(decoded):
+    """Names of every <item type="layout"> in res/values*/layouts.xml
+    — the kept "L|..." codes of step 2d and any file-backed layout
+    apktool decoded there."""
+    names = set()
+    import glob as _g
+
+    for lx in _g.glob(os.path.join(decoded, "res", "values*", "layouts.xml")):
+        with open(lx, "r", encoding="utf-8") as fh:
+            for m in re.finditer(
+                r'<item\b[^>]*\btype="layout"[^>]*\bname="([^"]+)"', fh.read()
+            ):
+                names.add(m.group(1))
+    return names
+
+
+def _existing_layouts(decoded):
+    """Layouts the app can inflate: a layouts.xml item (a kept code)
+    or a layout file on disk. Anything else is dangling."""
+    names = _layout_names_defined(decoded)
+    import glob as _g
+
+    for ld in _g.glob(os.path.join(decoded, "res", "layout*")):
+        if not os.path.isdir(ld):
+            continue
+        for f in os.listdir(ld):
+            if f.endswith(".xml"):
+                names.add(f[:-4])
+    return names
 
 
 def main():
@@ -200,65 +301,123 @@ def main():
     with open(manifest_path, "w", encoding="utf-8") as fh:
         fh.write(manifest)
 
-    # 2d. Sanitize values*/layouts.xml: apktool decodes some <item
-    # type="layout"> entries to non-reference values (dead entries whose
-    # layout file was stripped by Instagram's resource shrinking) and
-    # aapt2 refuses them ("invalid value for type 'layout'. Expected a
-    # reference"). Remove those items; entries with a real @reference
-    # value are kept. Report what the invalid values looked like.
+    # 2d. Keep the layout indirection codes (see header, section B):
+    # apktool decodes every "L|..." layout value into
+    # res/values*/layouts.xml as <item type="layout">L|...</item> and
+    # aapt2 refuses a non-reference value for a layout item ("invalid
+    # value for type 'layout'. Expected a reference"). Deleting them
+    # (what v1 did) deletes the app's own layouts — launch dies on
+    # getString(0x7f0e0949). Instead each code is moved into a string
+    # resource in the SAME config (2d2 below) and the item becomes a
+    # reference to it: getString() follows the reference and returns
+    # the exact original code, and the layout keeps its original id.
+    # Items that already hold a reference are kept untouched; only a
+    # truly empty item is removed (there is nothing to keep).
     import glob as _glob
     layout_item_re = re.compile(
-        r'<item\s+type="layout"[^>]*>(.*?)</item>', re.DOTALL
+        r'<item\b[^>]*\btype="layout"[^>]*>(.*?)</item>', re.DOTALL
     )
+
+    def _existing_string_names(config_dir):
+        names = set()
+        sp = os.path.join(decoded, "res", config_dir, "strings.xml")
+        if os.path.isfile(sp):
+            with open(sp, "r", encoding="utf-8") as fh:
+                for m in re.finditer(
+                    r'<string\s[^>]*\bname="([^"]+)"', fh.read()
+                ):
+                    names.add(m.group(1))
+        return names
+
+    code_strings = {}  # config dir -> [(string_name, code)]
     for lx in sorted(_glob.glob(os.path.join(decoded, "res", "values*", "layouts.xml"))):
+        config_dir = os.path.basename(os.path.dirname(lx))
         with open(lx, "r", encoding="utf-8") as fh:
             content = fh.read()
-        removed = []
+        taken = _existing_string_names(config_dir)
+        converted = []
         kept = [0]
+        removed = []
+
         def _fix(m):
+            opening = m.group(0).split(">", 1)[0] + ">"
+            nm = re.search(r'\bname="([^"]+)"', opening)
             val = m.group(1).strip()
             if val.startswith("@"):
                 kept[0] += 1
                 return m.group(0)
-            removed.append(val[:80])
-            return ""
+            if not val or nm is None:
+                removed.append(nm.group(1) if nm else val[:80])
+                return ""
+            lname = nm.group(1)
+            base = "rdx_layout_" + lname
+            sname = base
+            n = 2
+            while sname in taken:
+                sname = "%s_%d" % (base, n)
+                n += 1
+            taken.add(sname)
+            code_strings.setdefault(config_dir, []).append((sname, val))
+            converted.append(lname)
+            return opening + "@string/" + sname + "</item>"
+
         new_content = layout_item_re.sub(_fix, content)
-        if removed:
+        if converted or removed:
             with open(lx, "w", encoding="utf-8") as fh:
                 fh.write(new_content)
             changes.append(
-                f"layouts sanitize {os.path.relpath(lx, decoded)}: "
-                f"removed {len(removed)} non-reference layout items "
-                f"(e.g. {removed[:3]!r}), kept {kept[0]}"
+                f"layouts keep-codes {os.path.relpath(lx, decoded)}: "
+                f"converted {len(converted)} 'L|...' values to "
+                f"@string refs (e.g. {converted[:3]!r}), kept "
+                f"{kept[0]} references, removed {len(removed)} empty"
             )
 
+    # 2d2. Materialize the code strings: one <string> per converted
+    # layout item, in the same config's strings.xml so the reference
+    # from that config's layouts.xml resolves in that config.
+    for config_dir in sorted(code_strings):
+        sp = os.path.join(decoded, "res", config_dir, "strings.xml")
+        if os.path.isfile(sp):
+            with open(sp, "r", encoding="utf-8") as fh:
+                stext = fh.read()
+        else:
+            stext = '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n</resources>\n'
+        additions = "".join(
+            '    <string name="%s">%s</string>\n' % (name, _xml_escape(code))
+            for name, code in code_strings[config_dir]
+        )
+        if "</resources>" in stext:
+            stext = stext.replace("</resources>", additions + "</resources>", 1)
+        else:
+            stext = stext.rstrip() + "\n" + additions + "</resources>\n"
+        with open(sp, "w", encoding="utf-8") as fh:
+            fh.write(stext)
+        changes.append(
+            "layout codes stored as strings in res/%s/strings.xml: %d"
+            % (config_dir, len(code_strings[config_dir]))
+        )
+
     # 2e. Prune dangling <public> entries: Instagram's resource shrinking
-    # strips some layout XML files but apktool still writes their names
-    # into res/values/public.xml, and aapt2 then fails the link with
-    # "no definition for declared symbol 'com.rdx.gram:layout/<name>'".
-    # (Side-by-side run 43136930351 failed exactly on 20 such layouts:
-    # ac_transition_top_banner, account_row, action_bar, ... — the
-    # previous run 43136423466 had failed one layer earlier on the
-    # layouts.xml items that 2d now removes.) A <public> entry is
-    # removed ONLY when no file on disk defines that resource, and
-    # only for purely file-based types (layout, drawable, mipmap, anim,
-    # animator, raw, xml, menu, font). Value-based types (string,
-    # style, dimen, id, attr, ...) live in values XMLs and are never
-    # touched. The freed IDs simply go unused: the stock APK's table
-    # also has no file behind them, so no live code path can inflate
-    # them, and the remaining ~29k entries keep their original IDs.
+    # strips some files but apktool still writes their names into
+    # res/values/public.xml, and aapt2 then fails the link with
+    # "no definition for declared symbol 'com.rdx.gram:<type>/<name>'".
+    # (Side-by-side run 43136930351 failed exactly on 20 such layouts.)
+    # A <public> entry is removed ONLY when no file on disk defines
+    # that resource AND no values XML defines it as an <item> — the
+    # layouts.xml items (the kept "L|..." codes of 2d) are definitions,
+    # and pruning them deletes the app's own layouts (run 43600558276:
+    # layout entries fell from 6,049 to 66). Only purely file-based
+    # types are candidates (layout, drawable, mipmap, anim, animator,
+    # raw, xml, menu, font). Value-based types (string, style, dimen,
+    # id, attr, ...) live in values XMLs and are never touched.
     import glob as _glob2
     public_path = os.path.join(decoded, "res", "values", "public.xml")
     if os.path.isfile(public_path):
         with open(public_path, "r", encoding="utf-8") as fh:
             public_lines = fh.read().splitlines(keepends=True)
-        # layout names still defined by a kept @-reference item in
-        # values*/layouts.xml (after 2d) count as defined.
-        ref_layouts = set()
-        for lx in sorted(_glob2.glob(os.path.join(decoded, "res", "values*", "layouts.xml"))):
-            with open(lx, "r", encoding="utf-8") as fh:
-                for m in re.finditer(r'<item\s+type="layout"\s+name="([^"]+)"[^>]*>@', fh.read()):
-                    ref_layouts.add(m.group(1))
+        # Resources defined by an <item> in any values XML (after 2d)
+        # count as defined, whatever their value is.
+        value_defined = _value_defined_items(decoded)
         file_type_dirs = {
             "layout": ("layout", (".xml",)),
             "drawable": ("drawable", (".xml", ".png", ".jpg", ".jpeg", ".webp", ".9.png")),
@@ -279,7 +438,7 @@ def main():
                 kept_lines.append(line)
                 continue
             rtype, rname = m.group(1), m.group(2)
-            if rtype == "layout" and rname in ref_layouts:
+            if rname in value_defined.get(rtype, set()):
                 kept_lines.append(line)
                 continue
             prefix, exts = file_type_dirs[rtype]
@@ -315,29 +474,17 @@ def main():
     # direct_blocker_composer, igds_search_row, branding_view and the
     # two igvr_ variants). Remove ONLY an <item> whose value is exactly
     # @layout/<name> with no file on disk (any res/layout* dir) and no
-    # kept @-reference in layouts.xml. This follows the same rule as
-    # 2d/2e: the stock APK has no file behind these names, so no live
-    # code path in the stock app can inflate them either, and dropping
-    # the item lets the theme fall back to its parent/default instead
-    # of inventing a fake layout. A stub file would be riskier: if any
-    # path ever inflates it, an empty stub returns a blank view (or a
-    # cast crash) where removal just leaves the attribute unset.
+    # layouts.xml item (a kept "L|..." code counts as defined — see 2d).
+    # This follows the same rule as 2d/2e: the stock APK has no file
+    # behind these names, so no live code path in the stock app can
+    # inflate them either, and dropping the item lets the theme fall
+    # back to its parent/default instead of inventing a fake layout.
+    # A stub file would be riskier: if any path ever inflates it, an
+    # empty stub returns a blank view (or a cast crash) where removal
+    # just leaves the attribute unset.
     # @android:layout/... refs are framework refs and are never touched.
     import glob as _glob3
-    # Layout names kept as @-references in layouts.xml (recomputed here
-    # so 2f does not depend on public.xml existing, unlike 2e's local).
-    ref_layouts_2f = set()
-    for lx in sorted(_glob3.glob(os.path.join(decoded, "res", "values*", "layouts.xml"))):
-        with open(lx, "r", encoding="utf-8") as fh:
-            for m in re.finditer(r'<item\s+type="layout"\s+name="([^"]+)"[^>]*>@', fh.read()):
-                ref_layouts_2f.add(m.group(1))
-    existing_layouts = set(ref_layouts_2f)
-    for _ld in _glob3.glob(os.path.join(decoded, "res", "layout*")):
-        if not os.path.isdir(_ld):
-            continue
-        for _f in os.listdir(_ld):
-            if _f.endswith(".xml"):
-                existing_layouts.add(_f[:-4])
+    existing_layouts = _existing_layouts(decoded)
     style_item_re = re.compile(
         r'<item\s+name="([^"]+)"[^>]*>\s*@layout/([A-Za-z0-9_]+)\s*</item>'
     )
@@ -366,11 +513,11 @@ def main():
     # bottom_sheet_container, the layout_tagging_* set) referenced from
     # res/layout/*.xml — aapt2 reports only the first ~20 errors, so
     # each fix reveals the next batch (2d -> 2e -> 2f -> this one).
-    # Same rule as 2f: a layout with no file on disk and no kept
-    # @-reference in layouts.xml cannot be inflated by any live code
-    # path in the stock app either, so removing the reference is safe
-    # (far safer than a stub: a stub would render as a blank view or a
-    # cast crash if any path ever inflates it).
+    # Same rule as 2f: a layout with no file on disk and no layouts.xml
+    # item (a kept "L|..." code counts as defined) cannot be inflated
+    # by any live code path in the stock app either, so removing the
+    # reference is safe (far safer than a stub: a stub would render as
+    # a blank view or a cast crash if any path ever inflates it).
     #  - values XMLs other than layouts.xml: drop <item>@layout/X</item>
     #    where X is missing (2f did this only for styles.xml).
     #  - layout/menu/xml files: drop a whole <include layout="@layout/X">
@@ -445,6 +592,64 @@ def main():
             "2h total: %d distinct dangling layout names pruned from resource XMLs"
             % len(dangling_layouts_2h)
         )
+
+    # 2i. Repair the Play-split dimension holes (see header, section
+    # D2): in res/values/styles.xml, replace the @null value of three
+    # style items with the literal dimension the full app uses.
+    # Scoped to the exact style block, so an unrelated style that
+    # legitimately sets the same attribute to @null is untouched.
+    # A missing repair is fatal: the build cannot launch without it.
+    split_repairs = [
+        # (style name, attribute name, literal dimension, why)
+        ("Base.Theme.Instagram", "tabBarHeight", "48.0dip",
+         "main layout tab bar height + container margins"),
+        ("Avatar", "strokeWidth", "2.0px",
+         "tab-bar profile avatar ring"),
+        ("BaseNightTheme", "mediaViewOuterVerticalMargin", "6.0dip",
+         "media view outer margin (dark theme)"),
+        ("Theme.Instagram", "mediaViewOuterVerticalMargin", "6.0dip",
+         "media view outer margin (light theme)"),
+    ]
+    styles_path = os.path.join(decoded, "res", "values", "styles.xml")
+    if not os.path.isfile(styles_path):
+        print("SPLIT_REPAIR_MISSING: res/values/styles.xml not found")
+        return 1
+    with open(styles_path, "r", encoding="utf-8") as fh:
+        styles_text = fh.read()
+    for style_name, attr_name, literal, why in split_repairs:
+        block_re = re.compile(
+            r'(<style\s+name="' + re.escape(style_name) + r'"[^>]*>)(.*?)(</style>)',
+            re.DOTALL,
+        )
+
+        def _repair_block(m, attr_name=attr_name, literal=literal):
+            head, body, tail = m.group(1), m.group(2), m.group(3)
+            item_re = re.compile(
+                r'(<item\s+name="' + re.escape(attr_name) + r'"[^>]*>)@null(</item>)'
+            )
+            new_body, n = item_re.subn(
+                lambda im: im.group(1) + literal + im.group(2), body, count=1
+            )
+            if n == 0:
+                return m.group(0)
+            _repair_block.done = True
+            return head + new_body + tail
+
+        _repair_block.done = False
+        styles_text, n_blocks = block_re.subn(_repair_block, styles_text, count=1)
+        if not _repair_block.done:
+            print(
+                "SPLIT_REPAIR_MISSING: <item name=%r>@null</item> not "
+                "found in <style name=%r> (%s)"
+                % (attr_name, style_name, why)
+            )
+            return 1
+        changes.append(
+            "split repair %s/%s -> %s (%s)"
+            % (style_name, attr_name, literal, why)
+        )
+    with open(styles_path, "w", encoding="utf-8") as fh:
+        fh.write(styles_text)
 
     # 3. Label string value in every values*/strings.xml
     # (belt-and-suspenders for the literal manifest labels of 2g):
