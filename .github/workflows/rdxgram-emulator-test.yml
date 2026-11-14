@@ -1,0 +1,101 @@
+# RdxGram emulator test — launch crash check (no phone needed)
+#
+# Purpose (2026-11-14, Hossein approved): install an ALREADY BUILT RdxGram
+# APK on a GitHub-hosted Android emulator, open it, wait, and capture
+# whether it stays alive or crashes on launch — with logcat + screenshot.
+# This workflow NEVER builds an APK; it only tests a release asset.
+#
+# Why GitHub Actions: the user's server has no /dev/kvm (no nested
+# virtualization), so a local emulator there would be unusably slow.
+# GitHub-hosted ubuntu runners DO expose /dev/kvm, so the accelerated
+# emulator works here, and the run costs nothing extra (private repo free
+# minutes; one run is ~10-20 min).
+#
+# Trigger: manual only (workflow_dispatch). Input apk_tag picks the release
+# tag; default is the theme build (package com.instagram.android).
+# The job does NOT fail when the app crashes — a crash is a result, not a
+# CI failure. Verdict lives in status.txt inside the uploaded artifact.
+
+name: RdxGram emulator test (launch crash check)
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_tag:
+        description: "Release tag of the already-built APK to test"
+        required: true
+        default: "instagram-451.0.0.53.80-rdxgram-theme-1.0"
+
+permissions:
+  contents: read
+
+jobs:
+  emulator-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install APK on emulator and watch it launch
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          ram-size: 4096M
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            set -x
+            TAG="${{ inputs.apk_tag }}"
+            echo "apk_tag=$TAG"
+            mkdir -p apk
+            gh release download "$TAG" -p 'Instagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk
+            ls -la apk
+            APK=$(ls apk/Instagram-*.apk | head -n1)
+            echo "apk=$APK size=$(stat -c%s "$APK")"
+            # Clear the log so the dump is mostly about this launch.
+            adb logcat -c || true
+            if ! adb install -r -g "$APK"; then
+              echo "INSTALL_FAILED" > status.txt
+              echo "tag=$TAG" >> status.txt
+              echo "apk=$(basename "$APK")" >> status.txt
+              adb logcat -d > logcat.txt || true
+              adb exec-out screencap -p > screen.png || true
+              echo "INSTALL FAILED — see logcat.txt"
+              exit 0
+            fi
+            # Open the app the way a launcher tap would.
+            adb shell monkey -p com.instagram.android -c android.intent.category.LAUNCHER 1 || true
+            sleep 45
+            if adb shell pidof com.instagram.android >/dev/null 2>&1; then
+              echo "ALIVE" > status.txt
+            else
+              echo "CRASHED" > status.txt
+            fi
+            echo "tag=$TAG" >> status.txt
+            echo "apk=$(basename "$APK")" >> status.txt
+            echo "apk_size=$(stat -c%s "$APK")" >> status.txt
+            echo "checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> status.txt
+            adb logcat -d > logcat.txt || true
+            adb exec-out screencap -p > screen.png || true
+            echo "verdict: $(head -n1 status.txt)"
+            exit 0
+
+      - name: Upload test results (always, even on crash)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdxgram-emulator-test
+          path: |
+            status.txt
+            logcat.txt
+            screen.png
+          retention-days: 30
