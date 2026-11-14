@@ -186,8 +186,9 @@ jobs:
         run: |
           PATCHED="$(ls out/*-lspatched.apk | head -1)"
           test -n "$PATCHED"
-          cp "$PATCHED" "Instagram-${VERSION_NAME}-RdxGram-Theme-${{ inputs.theme_version }}-testkey.apk"
-          echo "PATCHED_APK=Instagram-${VERSION_NAME}-RdxGram-Theme-${{ inputs.theme_version }}-testkey.apk" >> "$GITHUB_ENV"
+          PATCHED_APK="Instagram-${VERSION_NAME}-RdxGram-Theme-${{ inputs.theme_version }}-testkey.apk"
+          cp "$PATCHED" "$PATCHED_APK"
+          echo "PATCHED_APK=$PATCHED_APK" >> "$GITHUB_ENV"
           ls -la "$PATCHED_APK"
           "$BT/aapt" dump badging "$PATCHED_APK" | head -3
           "$BT/aapt" dump badging "$PATCHED_APK" | grep -q "package: name='com.instagram.android'"
