@@ -34,6 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Check out (for the test script)
+        uses: actions/checkout@v4
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -71,42 +74,7 @@ jobs:
           ram-size: 4096M
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            set -x
-            TAG="${{ inputs.apk_tag }}"
-            echo "apk_tag=$TAG"
-            mkdir -p apk
-            gh release download "$TAG" -p 'Instagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk
-            ls -la apk
-            APK=$(ls apk/Instagram-*.apk | head -n1)
-            echo "apk=$APK size=$(stat -c%s "$APK")"
-            # Clear the log so the dump is mostly about this launch.
-            adb logcat -c || true
-            if ! adb install -r -g "$APK"; then
-              echo "INSTALL_FAILED" > status.txt
-              echo "tag=$TAG" >> status.txt
-              echo "apk=$(basename "$APK")" >> status.txt
-              adb logcat -d > logcat.txt || true
-              adb exec-out screencap -p > screen.png || true
-              echo "INSTALL FAILED — see logcat.txt"
-              exit 0
-            fi
-            # Open the app the way a launcher tap would.
-            adb shell monkey -p com.instagram.android -c android.intent.category.LAUNCHER 1 || true
-            sleep 45
-            if adb shell pidof com.instagram.android >/dev/null 2>&1; then
-              echo "ALIVE" > status.txt
-            else
-              echo "CRASHED" > status.txt
-            fi
-            echo "tag=$TAG" >> status.txt
-            echo "apk=$(basename "$APK")" >> status.txt
-            echo "apk_size=$(stat -c%s "$APK")" >> status.txt
-            echo "checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> status.txt
-            adb logcat -d > logcat.txt || true
-            adb exec-out screencap -p > screen.png || true
-            echo "verdict: $(head -n1 status.txt)"
-            exit 0
+          script: bash .github/scripts/emulator-test.sh "${{ inputs.apk_tag }}"
 
       - name: Upload test results (always, even on crash)
         if: always()
