@@ -19,7 +19,9 @@ library only and asserts, for a rebuilt or LSPatch-patched APK:
     in, so the check follows one reference hop);
   - at least 6,000 layout entries are present (stock: 6,049);
   - at least 5,900 of them resolve to "L|..." codes (stock: 5,988);
-  - the app label string 0x7f130009 resolves to "Rdx gram";
+  - the app label string 0x7f130009 resolves to the expected label
+    ("Rdx gram" by default; the theme build passes --expect-label
+    Instagram, since it keeps the stock package and label);
   - attr 0x7f040d3e (tabBarHeight) is present;
   - the Play-split dimension repairs (rebrand step 2i) are present
     as REAL dimension resources at their original ids, with the
@@ -48,7 +50,7 @@ library only and asserts, for a rebuilt or LSPatch-patched APK:
     modal's input_background selector depends on three of the
     images (input, input_highlighted, input_night).
 
-Usage: verify_layout_values.py <apk>
+Usage: verify_layout_values.py [--expect-label LABEL] <apk>
 Exits 0 when every check passes, 1 otherwise.
 """
 import collections
@@ -219,10 +221,23 @@ def _find_2k_json():
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("usage: verify_layout_values.py <apk>")
+    args = sys.argv[1:]
+    expect_label = "Rdx gram"
+    while args and args[0].startswith("--"):
+        opt = args.pop(0)
+        if opt == "--expect-label":
+            if not args:
+                print("usage: verify_layout_values.py "
+                      "[--expect-label LABEL] <apk>")
+                return 2
+            expect_label = args.pop(0)
+        else:
+            print(f"unknown option: {opt}")
+            return 2
+    if len(args) != 1:
+        print("usage: verify_layout_values.py [--expect-label LABEL] <apk>")
         return 2
-    path = sys.argv[1]
+    path = args[0]
     with zipfile.ZipFile(path) as zf:
         arsc = zf.read("resources.arsc")
     main_sp, entries, style_bags = parse_arsc(arsc)
@@ -375,8 +390,9 @@ def main():
             f"LAYOUT_CODES_LOW: {layout_codes} layouts resolve to "
             "'L|...' codes (stock: 5988)"
         )
-    if label != "Rdx gram":
-        failures.append(f"LABEL_WRONG: 0x7f130009 resolves to {label!r}")
+    if label != expect_label:
+        failures.append(f"LABEL_WRONG: 0x7f130009 resolves to {label!r} "
+                        f"(expected {expect_label!r})")
     if (0x04, 0x0D3E) not in entries:
         failures.append("ATTR_TABBARHEIGHT_MISSING: 0x7f040d3e absent")
     for style_name, attr_name, did, want, unit in repairs:

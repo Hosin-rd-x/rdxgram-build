@@ -278,7 +278,7 @@ jobs:
       - name: Verify layout indirection survived the rebuild
         if: env.HAS_LIBS == 'true'
         run: |
-          python3 .github/scripts/verify_layout_values.py ig-theme.apk
+          python3 .github/scripts/verify_layout_values.py --expect-label Instagram ig-theme.apk
 
       - name: Patch rebuilt APK with LSPatch (embed theme module, inject loader dex, sig bypass 2)
         if: env.HAS_LIBS == 'true'
@@ -319,7 +319,7 @@ jobs:
           echo "--- no requiredSplitTypes + arsc stored and 4-byte aligned ---"
           python3 .github/scripts/strip_required_splits.py --check "$PATCHED_APK"
           python3 .github/scripts/strip_required_splits.py --check-arsc "$PATCHED_APK"
-          python3 .github/scripts/verify_layout_values.py "$PATCHED_APK"
+          python3 .github/scripts/verify_layout_values.py --expect-label Instagram "$PATCHED_APK"
           "$BT/apksigner" verify --verbose --print-certs "$PATCHED_APK"
           echo "--- embedded module ---"
           unzip -l "$PATCHED_APK" | grep -i "lspatch/modules" || (echo "MODULE_NOT_EMBEDDED" && exit 1)
