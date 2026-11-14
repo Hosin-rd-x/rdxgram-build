@@ -34,10 +34,14 @@
 #   4. apktool rebuilds the renamed APK (unsigned).
 #   5. LSPatch 1.0 embeds the theme module + loader dex + sig bypass 2 and
 #      signs with testkey — the same proven flags as rdxgram-theme.yml.
-#   6. Verify: package com.rdx.gram, label "Rdx gram" (application AND
-#      launchable activity), icon dimensions per density (icon + bg/fg
-#      layers + internal_icon), module embedded (classes + Inter font
-#      SHA), no requiredSplitTypes, apksigner OK.
+#   6. Verify: package com.rdx.gram, label "Rdx gram" (application label
+#      via badging + literal labels in the decoded manifest — aapt badging
+#      does NOT list a launchable-activity when the launcher entries are
+#      activity-aliases, so the MAIN/LAUNCHER filter is checked in the
+#      manifest tree with aapt dump xmltree instead), icon dimensions
+#      per density (icon + bg/fg layers + internal_icon), module
+#      embedded (classes + Inter font SHA), no requiredSplitTypes,
+#      apksigner OK.
 #
 # Honest risk (also in the release notes): Instagram checks its own
 # signature/package; base 451 + LSPatch + rename has NEVER been phone-tested
@@ -197,10 +201,17 @@ jobs:
           "$BT/aapt" dump badging ig-renamed.apk | head -3
           "$BT/aapt" dump badging ig-renamed.apk | grep -q "package: name='com.rdx.gram'"
           "$BT/aapt" dump badging ig-renamed.apk | grep -q "application-label:'Rdx gram'" || (echo "APP_LABEL_NOT_RDX_GRAM" && exit 1)
-          echo "--- launchable activities ---"
-          "$BT/aapt" dump badging ig-renamed.apk | grep "launchable-activity" || echo "no launchable-activity line in badging"
-          "$BT/aapt" dump badging ig-renamed.apk | grep "launchable-activity" | grep -q "label='Rdx gram'" || (echo "LAUNCHER_LABEL_NOT_RDX_GRAM" && exit 1)
-          echo "renamed APK verified: package com.rdx.gram, label 'Rdx gram'"
+          echo "--- MAIN/LAUNCHER intent filter in rebuilt manifest ---"
+          echo "NOTE: aapt dump badging does NOT list a launchable-activity when the"
+          echo "launcher entries are activity-aliases (as on IG 451: MainTabActivity"
+          echo "and InternalLauncher aliases carry MAIN/LAUNCHER), so check the"
+          echo "manifest tree directly instead of badging."
+          "$BT/aapt" dump xmltree ig-renamed.apk AndroidManifest.xml > /tmp/manifest-tree.txt
+          grep -q "android.intent.action.MAIN" /tmp/manifest-tree.txt || (echo "NO_MAIN_INTENT_FILTER" && exit 1)
+          grep -q "android.intent.category.LAUNCHER" /tmp/manifest-tree.txt || (echo "NO_LAUNCHER_CATEGORY" && exit 1)
+          grep -q "com.instagram.android.activity.MainTabActivity" /tmp/manifest-tree.txt || (echo "MAINTAB_ALIAS_MISSING" && exit 1)
+          grep -q "Rdx gram" /tmp/manifest-tree.txt || (echo "RDX_GRAM_LABEL_MISSING_IN_MANIFEST_TREE" && exit 1)
+          echo "renamed APK verified: package com.rdx.gram, label 'Rdx gram', MAIN/LAUNCHER filter present"
 
       - name: Verify renamed icon dimensions
         run: |
@@ -289,7 +300,10 @@ jobs:
           "$BT/aapt" dump badging "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" | head -3
           "$BT/aapt" dump badging "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" | grep -q "package: name='com.rdx.gram'"
           "$BT/aapt" dump badging "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" | grep -q "application-label:'Rdx gram'"
-          "$BT/aapt" dump badging "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" | grep "launchable-activity" | grep -q "label='Rdx gram'" || (echo "LAUNCHER_LABEL_NOT_RDX_GRAM" && exit 1)
+          "$BT/aapt" dump xmltree "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" AndroidManifest.xml > /tmp/manifest-tree-final.txt
+          grep -q "android.intent.action.MAIN" /tmp/manifest-tree-final.txt || (echo "NO_MAIN_INTENT_FILTER_FINAL" && exit 1)
+          grep -q "android.intent.category.LAUNCHER" /tmp/manifest-tree-final.txt || (echo "NO_LAUNCHER_CATEGORY_FINAL" && exit 1)
+          grep -q "Rdx gram" /tmp/manifest-tree-final.txt || (echo "RDX_GRAM_LABEL_MISSING_FINAL" && exit 1)
           python3 .github/scripts/strip_required_splits.py --check "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
           python3 .github/scripts/strip_required_splits.py --check-arsc "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
           "$BT/apksigner" verify --verbose --print-certs "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
