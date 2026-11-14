@@ -34,6 +34,17 @@
 #   4. apktool rebuilds the renamed APK (unsigned).
 #   5. LSPatch 1.0 embeds the theme module + loader dex + sig bypass 2 and
 #      signs with testkey — the same proven flags as rdxgram-theme.yml.
+#      BUT: LSPatch 1.0 cannot patch an UNSIGNED apktool rebuild — its log
+#      says "Could not read the original apk's signature" and the output
+#      is degenerate (a zip holding only assets/lspatch/origin.apk, no
+#      manifest at all; seen in run 43594917967). So ig-renamed.apk is
+#      first signed with the same testkey (apksigner) and only then
+#      patched; the patch step fails fast if LSPatch still cannot read
+#      the signature. NOTE: the rebuilt APK can never carry Instagram's
+#      original Meta signature, so sig bypass 2 here can only present
+#      the testkey signature to the app — login with the test account
+#      is an open question for the phone test (InstaPro, also re-signed,
+#      did log in on Hossein's phone 2026-11-07, so it may be fine).
 #   6. Verify: package com.rdx.gram, label "Rdx gram" (application label
 #      via badging + literal labels in the decoded manifest — aapt badging
 #      does NOT list a launchable-activity when the launcher entries are
@@ -282,6 +293,9 @@ jobs:
           test -n "$TESTKEY_P12_B64"
           test -n "$TESTKEY_PASSWORD"
           echo "$TESTKEY_P12_B64" | base64 -d > testkey.p12
+          echo "--- pre-sign the apktool rebuild (LSPatch cannot patch an unsigned APK: it logs 'Could not read the original apk's signature' and outputs only origin.apk) ---"
+          "$BT/apksigner" sign --ks testkey.p12 --ks-type PKCS12 --ks-pass "pass:$TESTKEY_PASSWORD" --ks-key-alias testkey --key-pass "pass:$TESTKEY_PASSWORD" ig-renamed.apk
+          "$BT/apksigner" verify --verbose ig-renamed.apk || (echo "PRESIGN_VERIFY_FAILED" && exit 1)
           java -jar lspatch-v1.0-455-release.jar \
             -m "$MODULE_APK" \
             --injectdex \
@@ -289,6 +303,8 @@ jobs:
             -k testkey.p12 "$TESTKEY_PASSWORD" testkey "$TESTKEY_PASSWORD" \
             -o out -f -v ig-renamed.apk 2>&1 | tee lspatch.log
           rm -f testkey.p12
+          if grep -q "Could not read the original apk's signature" lspatch.log; then echo "LSPATCH_SIGNATURE_READ_FAILED"; exit 1; fi
+          echo "LSPatch read the original signature OK"
           ls -la out/
 
       - name: Verify patched side-by-side APK
