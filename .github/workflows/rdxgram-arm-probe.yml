@@ -28,7 +28,7 @@ on:
       apk_tag:
         description: "Release tag of the already-built APK to test"
         required: true
-        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.2"
+        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.3"
 
 permissions:
   contents: read
