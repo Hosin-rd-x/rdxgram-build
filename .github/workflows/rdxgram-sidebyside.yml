@@ -297,6 +297,8 @@ jobs:
           test -n "$PATCHED"
           cp "$PATCHED" "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
           ls -la "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
+          echo "--- patched APK zip listing (diagnostic: aapt cannot read this file) ---"
+          unzip -l "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" | head -25
           echo "--- manifest check (Python AXML parser) ---"
           echo "aapt dump badging fails on LSPatch+apktool APKs ('no AndroidManifest.xml"
           echo "found') even though the zip and manifest are valid — Android and"

@@ -120,7 +120,11 @@ def main():
         try:
             info = zf.getinfo("AndroidManifest.xml")
         except KeyError:
-            print("MANIFEST_ENTRY_MISSING: no AndroidManifest.xml in the zip")
+            names = zf.namelist()
+            print(f"MANIFEST_ENTRY_MISSING: no AndroidManifest.xml in the zip "
+                  f"({len(names)} entries; manifest-like: "
+                  f"{[n for n in names if 'anifest' in n]!r}; "
+                  f"first 10: {names[:10]!r})")
             return 1
         print(f"zip: AndroidManifest.xml compress_type={info.compress_type} "
               f"flag_bits={info.flag_bits} size={info.file_size} "
