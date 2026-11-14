@@ -9,7 +9,7 @@
 # truth about whether the app really launches.
 #
 # Trigger: manual only (workflow_dispatch). Input apk_tag defaults to the
-# release under test (currently RdxGram side-by-side 1.1):
+# release under test (currently RdxGram side-by-side 1.2):
 # if stock itself does not launch on Redroid, no modified build can be
 # judged against this probe). The job does NOT fail when the app crashes — a crash is
 # a result, not a CI failure. Verdict lives in status.txt in the artifact.
@@ -28,7 +28,7 @@ on:
       apk_tag:
         description: "Release tag of the already-built APK to test"
         required: true
-        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.1"
+        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.2"
 
 permissions:
   contents: read
