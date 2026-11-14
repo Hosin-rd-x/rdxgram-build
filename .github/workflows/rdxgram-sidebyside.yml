@@ -108,18 +108,33 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Locate Android build-tools 34
+      - name: Locate Android build-tools 35
+        # 35.0.0, NOT 34.0.0: apksigner 34 re-writes the APK with the
+        # zip entries in a content-sensitive order (a HashMap-like
+        # iteration), so the resources.arsc offset in the pre-signed
+        # APK — and hence in the LSPatch output, where arsc sits at
+        # 4096 + its input offset (LSPatch embeds the input as
+        # origin.apk) — swings by tens of MB between runs with
+        # nearly identical content (1.2 runs: 91358969 vs 71791369).
+        # apksigner 35 preserves the input zip layout (entry order
+        # and offsets), so the final arsc offset is a deterministic
+        # function of the content and the --check-arsc gate is
+        # stable. If 35.0.0 is missing, try installing it first.
         run: |
           ls "$ANDROID_HOME/build-tools"
-          test -x "$ANDROID_HOME/build-tools/34.0.0/apksigner"
-          test -x "$ANDROID_HOME/build-tools/34.0.0/zipalign"
-          test -x "$ANDROID_HOME/build-tools/34.0.0/aapt"
-          echo "BT=$ANDROID_HOME/build-tools/34.0.0" >> "$GITHUB_ENV"
+          if [ ! -x "$ANDROID_HOME/build-tools/35.0.0/apksigner" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "build-tools 35.0.0 missing; installing via sdkmanager"
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;35.0.0" >/dev/null 2>&1 || echo "sdkmanager install failed (continuing to check)"
+          fi
+          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/aapt"
+          echo "BT=$ANDROID_HOME/build-tools/35.0.0" >> "$GITHUB_ENV"
 
       - name: Ensure Android platform 34 (best effort)
         run: |
           if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || echo "sdkmanager install skipped (platform may already be present)"
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;35.0.0" >/dev/null 2>&1 || echo "sdkmanager install skipped (platform may already be present)"
           else
             echo "no sdkmanager; relying on the preinstalled SDK"
           fi
