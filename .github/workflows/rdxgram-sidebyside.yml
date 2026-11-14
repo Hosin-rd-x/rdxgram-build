@@ -297,13 +297,12 @@ jobs:
           test -n "$PATCHED"
           cp "$PATCHED" "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
           ls -la "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
-          "$BT/aapt" dump badging "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" | head -3
-          "$BT/aapt" dump badging "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" | grep -q "package: name='com.rdx.gram'"
-          "$BT/aapt" dump badging "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" | grep -q "application-label:'Rdx gram'"
-          "$BT/aapt" dump xmltree "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk" AndroidManifest.xml > /tmp/manifest-tree-final.txt
-          grep -q "android.intent.action.MAIN" /tmp/manifest-tree-final.txt || (echo "NO_MAIN_INTENT_FILTER_FINAL" && exit 1)
-          grep -q "android.intent.category.LAUNCHER" /tmp/manifest-tree-final.txt || (echo "NO_LAUNCHER_CATEGORY_FINAL" && exit 1)
-          grep -q "Rdx gram" /tmp/manifest-tree-final.txt || (echo "RDX_GRAM_LABEL_MISSING_FINAL" && exit 1)
+          echo "--- manifest check (Python AXML parser) ---"
+          echo "aapt dump badging fails on LSPatch+apktool APKs ('no AndroidManifest.xml"
+          echo "found') even though the zip and manifest are valid — Android and"
+          echo "Python's zipfile read them fine — so the patched APK is verified"
+          echo "with .github/scripts/verify_apk_manifest.py instead of aapt."
+          python3 .github/scripts/verify_apk_manifest.py --expect-package com.rdx.gram --expect-label "Rdx gram" "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
           python3 .github/scripts/strip_required_splits.py --check "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
           python3 .github/scripts/strip_required_splits.py --check-arsc "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
           "$BT/apksigner" verify --verbose --print-certs "Instagram-451.0.0.53.80-RdxGram-SideBySide-1.0-testkey.apk"
