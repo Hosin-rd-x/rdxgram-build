@@ -24,11 +24,15 @@
 # Output: Instagram-451.0.0.53.80-RdxGram-Theme-<version>-testkey.apk
 #   (package com.instagram.android, testkey-signed, RdxGram Theme module
 #   embedded under assets/lspatch/modules/ir.rdx.gram.theme.apk).
-# Since theme 1.1 the patched APK also has requiredSplitTypes stripped
-# from its manifest (see .github/scripts/strip_required_splits.py) so it
-# installs standalone on a clean device — the Play-bundle density split
-# is not inside the single APK (INSTALL_FAILED_MISSING_SPLIT, emulator
-# run 43588589307). The APK is zipaligned + re-signed after stripping.
+# Since theme 1.1 the base APK's manifest has requiredSplitTypes stripped
+# BEFORE patching (see .github/scripts/strip_required_splits.py) so the
+# final APK installs standalone on a clean device — the Play-bundle
+# density split is not inside the single APK (INSTALL_FAILED_MISSING_SPLIT,
+# emulator run 43588589307). Stripping the base (not the patched APK)
+# matters: LSPatch preserves the manifest and signs the output itself,
+# so the final APK stays ~141 MB; stripping the patched APK instead
+# would force zipalign + re-sign, which expands LSPatch's nested-APK
+# layout from ~141 MB to ~277 MB.
 #   The font and the bar themselves are verified only by the phone test —
 #   this workflow verifies the module IS the theme module (classes +
 #   font asset + xposed entries present) and the APK is well-formed
@@ -129,6 +133,26 @@ jobs:
           test "$(sha256sum ig/instagram-451.0.0.53.80.apk | cut -d' ' -f1)" = "9eff1efa4591d53f8d97631c67a381a26a01929e093f604b37aa69fdf443d628"
           echo "stock Instagram 451.0.0.53.80 base APK, SHA-256 verified" | tee download.log
 
+      - name: Strip requiredSplitTypes from base APK (standalone install)
+        run: |
+          # Stock Instagram 451 is a Play-bundle build: its manifest
+          # declares requiredSplitTypes='base__density', and the density
+          # config split is not inside the single base APK — so the APK
+          # refuses to install on a clean device (INSTALL_FAILED_MISSING_SPLIT,
+          # seen in emulator run 43588589307). Remove that one attribute
+          # from the base manifest BEFORE patching: LSPatch preserves the
+          # manifest and signs the output itself, so the final APK stays
+          # ~141 MB. (Stripping the patched APK instead would force
+          # zipalign + re-sign, which expands LSPatch's nested-APK layout
+          # from ~141 MB to ~277 MB.)
+          # NOTE: this runs AFTER the download step's SHA-256 check, so the
+          # stock file is still verified byte-identical before we touch it.
+          python3 .github/scripts/strip_required_splits.py ig/instagram-451.0.0.53.80.apk ig/instagram-stripped.apk
+          test -s ig/instagram-stripped.apk
+          mv ig/instagram-stripped.apk ig/instagram-451.0.0.53.80.apk
+          python3 .github/scripts/strip_required_splits.py --check ig/instagram-451.0.0.53.80.apk
+          ls -la ig/
+
       - name: Inspect downloaded APKs
         run: |
           for f in $(find ig -name '*.apk' | sort); do
@@ -206,43 +230,20 @@ jobs:
           unzip -p "$EMBEDDED" "assets/fonts/Inter-Variable.ttf" > /tmp/inter-embedded.ttf
           test "$(sha256sum /tmp/inter-embedded.ttf | cut -d' ' -f1)" = "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031" || (echo "EMBEDDED_FONT_SHA_MISMATCH" && exit 1)
           echo "embedded module verified: theme module + Inter font inside the final APK"
-          echo "--- zipalign (report only; real align happens after the strip step) ---"
+          echo "--- zipalign (report only; LSPatch output is shipped as-is, like 1.0) ---"
           "$BT/zipalign" -c -v 4 "$PATCHED_APK" || echo "ZIPALIGN_NOT_ALIGNED (install still works)"
           echo "--- SHA-256 (pre-strip) ---"
           sha256sum "$PATCHED_APK"
 
-      - name: Strip requiredSplitTypes + re-sign (standalone install)
+      - name: Confirm no requiredSplitTypes in final APK
         if: env.HAS_LIBS == 'true'
-        env:
-          TESTKEY_P12_B64: ${{ secrets.TESTKEY_P12_B64 }}
-          TESTKEY_PASSWORD: ${{ secrets.TESTKEY_PASSWORD }}
         run: |
-          # Stock Instagram 451 is a Play-bundle build: its manifest
-          # declares requiredSplitTypes='base__density', and the density
-          # config split is not inside the single base APK — so the APK
-          # refuses to install on a clean device (INSTALL_FAILED_MISSING_SPLIT,
-          # seen in emulator run 43588589307). Remove that one attribute
-          # from the binary manifest (the base APK carries the default
-          # resources, so Android falls back to them), then zipalign and
-          # re-sign with the same testkey. The emulator test on the new
-          # release is the final judge of whether it runs.
-          python3 .github/scripts/strip_required_splits.py "$PATCHED_APK" stripped.apk
-          test -s stripped.apk
-          mv stripped.apk "$PATCHED_APK"
+          # LSPatch must have preserved the stripped base manifest; if the
+          # attribute came back, fail loudly instead of shipping an APK
+          # that cannot install on a clean device.
           python3 .github/scripts/strip_required_splits.py --check "$PATCHED_APK"
-          "$BT/zipalign" -f 4 "$PATCHED_APK" aligned.apk
-          mv aligned.apk "$PATCHED_APK"
-          test -n "$TESTKEY_P12_B64"
-          test -n "$TESTKEY_PASSWORD"
-          echo "$TESTKEY_P12_B64" | base64 -d > testkey.p12
-          "$BT/apksigner" sign --ks testkey.p12 --ks-pass "pass:$TESTKEY_PASSWORD" --key-pass "pass:$TESTKEY_PASSWORD" --ks-key-alias testkey "$PATCHED_APK"
-          rm -f testkey.p12
-          "$BT/apksigner" verify --verbose --print-certs "$PATCHED_APK"
-          "$BT/aapt" dump badging "$PATCHED_APK" | head -3
-          "$BT/aapt" dump badging "$PATCHED_APK" | grep -q "package: name='com.instagram.android'"
-          echo "--- SHA-256 (final) ---"
+          ls -la "$PATCHED_APK"
           sha256sum "$PATCHED_APK"
-          echo "FINAL_APK=$PATCHED_APK" >> "$GITHUB_ENV"
 
       - name: Upload APKs
         if: env.HAS_LIBS == 'true'
