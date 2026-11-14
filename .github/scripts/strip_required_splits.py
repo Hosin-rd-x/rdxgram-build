@@ -16,12 +16,19 @@ sizes are decremented. The string pool is untouched, so nothing else
 shifts. The ZIP is rewritten at the byte level (only the manifest
 entry changes; every other entry is copied verbatim, and any APK
 Signing Block is dropped — the APK MUST be re-signed afterwards with
-zipalign + apksigner). Byte-level rewriting is used because Python's
-zipfile refuses to read LSPatch output (overlapped origin.apk entry).
+zipalign + apksigner, unless the stripping happens on the base APK
+before LSPatch signs it). Byte-level rewriting is used because
+Python's zipfile refuses to read LSPatch output (overlapped
+origin.apk entry).
+The manifest is written back DEFLATED, as the stock APK has it:
+a STORED manifest changes LSPatch's output layout and breaks the
+4-byte alignment of resources.arsc (install error -124 on R+).
 
 Usage: strip_required_splits.py <in.apk> <out.apk>
        strip_required_splits.py --check <apk>   (exit 0 if the
        attribute is absent, 1 if present)
+       strip_required_splits.py --check-arsc <apk>   (exit 0 if
+       resources.arsc is stored and 4-byte aligned, 1 otherwise)
 Exits 0 when the attribute was removed (or was already absent).
 """
 import binascii
@@ -175,23 +182,41 @@ def rewrite_zip(data, new_manifest):
 
     new_crc = binascii.crc32(new_manifest) & 0xFFFFFFFF
     new_size = len(new_manifest)
+    # Keep the manifest DEFLATED (as the stock APK has it): writing it
+    # STORED shifts LSPatch's output layout and breaks the 4-byte
+    # alignment of resources.arsc (install error -124 on R+).
+    co = zlib.compressobj(6, zlib.DEFLATED, -15)
+    comp_manifest = co.compress(new_manifest) + co.flush()
+    new_csize = len(comp_manifest)
     old_local_total = span_end - lho  # header + data (+ descriptor, none)
-    # New local header: same fields, fresh CRC/sizes, method STORED
-    # (the new manifest is written uncompressed), data-descriptor
-    # flag cleared.
+    # The manifest entry precedes resources.arsc in the file, so any
+    # change to its total size shifts arsc's data offset. R+ requires
+    # arsc stored and 4-byte aligned, so the total size change must be
+    # a multiple of 4. Achieve that with a zipalign-style alignment
+    # extra field (ID 0xA11E, the same mechanism zipalign itself uses):
+    # a 4-byte header plus k zero bytes, with k chosen so the whole
+    # entry grows by a multiple of 4.
+    delta_bare = (30 + lfnlen + lexlen + new_csize) - old_local_total
+    k = (-delta_bare) % 4
+    align_field = struct.pack("<HH", 0xA11E, k) + b"\x00" * k
+    # New local header: same fields, fresh CRC/sizes, method DEFLATED,
+    # data-descriptor flag cleared, alignment field appended to extra.
     new_lh = bytearray(data[lho:data_start])
+    new_lh += align_field
     struct.pack_into("<H", new_lh, 6, lflags & ~0x08)
-    struct.pack_into("<H", new_lh, 8, 0)
+    struct.pack_into("<H", new_lh, 8, 8)
     struct.pack_into("<I", new_lh, 14, new_crc)
-    struct.pack_into("<I", new_lh, 18, new_size)
+    struct.pack_into("<I", new_lh, 18, new_csize)
     struct.pack_into("<I", new_lh, 22, new_size)
-    new_local_total = len(new_lh) + new_size
-    delta = new_local_total - old_local_total  # negative (manifest shrank)
+    struct.pack_into("<H", new_lh, 28, lexlen + len(align_field))
+    new_local_total = len(new_lh) + new_csize
+    delta = new_local_total - old_local_total
+    assert delta % 4 == 0, f"manifest size change {delta} not a multiple of 4"
 
     out = bytearray()
     out += data[:lho]                 # everything before the manifest
     out += new_lh                     # new local header
-    out += new_manifest               # new manifest data
+    out += comp_manifest              # new manifest data (deflated)
     out += data[span_end:sig_start]   # entries after the manifest, verbatim
     # Central directory: same records, adjusted offsets/sizes.
     cd_start = len(out)
@@ -199,15 +224,17 @@ def rewrite_zip(data, new_manifest):
         off = e["lho"] + delta if e["lho"] > lho else e["lho"]
         crc, csize, usize = e["crc"], e["csize"], e["usize"]
         method = e["method"]
+        extra = e["extra"]
         if e is man:
-            crc, csize, usize, method = new_crc, new_size, new_size, 0
+            crc, csize, usize, method = new_crc, new_csize, new_size, 8
+            extra = extra + align_field  # keep CD extra in sync with local
         rec = struct.pack("<HHHHHHIIIHHHHHII", e["vmade"], e["vneed"],
                           e["flags"] & ~0x08 if e is man else e["flags"],
                           method, e["mtime"], e["mdate"],
-                          crc, csize, usize, len(e["name"]), len(e["extra"]),
+                          crc, csize, usize, len(e["name"]), len(extra),
                           len(e["comment"]), e["disk"], e["iattr"],
                           e["eattr"], off)
-        out += b"PK\x01\x02" + rec + e["name"] + e["extra"] + e["comment"]
+        out += b"PK\x01\x02" + rec + e["name"] + extra + e["comment"]
     cd_end = len(out)
     # EOCD: same comment, updated CD offset/size.
     out += data[eocd_idx:eocd_idx + 4]
@@ -238,9 +265,35 @@ def main():
             raise SystemExit(1)
         print(f"CHECK OK: no {TARGET} in {sys.argv[2]}")
         return
+    if len(sys.argv) == 3 and sys.argv[1] == "--check-arsc":
+        # R+ install rule: resources.arsc must be stored uncompressed
+        # and its data must start on a 4-byte boundary, else the
+        # installer fails with -124 during parse.
+        with open(sys.argv[2], "rb") as fh:
+            data = fh.read()
+        eocd_idx, cdoff, cdsize, nrec, clen = find_eocd(data)
+        entries = parse_cd(data, cdoff, nrec)
+        ar = next((e for e in entries
+                   if e["name"].decode("utf-8", "replace") == "resources.arsc"), None)
+        if ar is None:
+            print("CHECK-ARSC FAIL: no resources.arsc entry")
+            raise SystemExit(1)
+        lho = ar["lho"]
+        (lver, lflags, lmethod, ltime, ldate, lcrc, lcsize, lusize,
+         lfnlen, lexlen) = struct.unpack_from("<HHHHHIIIHH", data, lho + 4)
+        dstart = lho + 30 + lfnlen + lexlen
+        if lmethod != 0:
+            print(f"CHECK-ARSC FAIL: resources.arsc compressed (method {lmethod})")
+            raise SystemExit(1)
+        if dstart % 4 != 0:
+            print(f"CHECK-ARSC FAIL: resources.arsc data starts at {dstart} (mod 4 = {dstart % 4})")
+            raise SystemExit(1)
+        print(f"CHECK-ARSC OK: resources.arsc stored, data at {dstart} (4-byte aligned)")
+        return
     if len(sys.argv) != 3:
         sys.stderr.write("usage: strip_required_splits.py <in.apk> <out.apk>\n"
-                         "       strip_required_splits.py --check <apk>\n")
+                         "       strip_required_splits.py --check <apk>\n"
+                         "       strip_required_splits.py --check-arsc <apk>\n")
         raise SystemExit(2)
     src, dst = sys.argv[1], sys.argv[2]
     with open(src, "rb") as fh:

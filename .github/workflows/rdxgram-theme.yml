@@ -240,8 +240,11 @@ jobs:
         run: |
           # LSPatch must have preserved the stripped base manifest; if the
           # attribute came back, fail loudly instead of shipping an APK
-          # that cannot install on a clean device.
+          # that cannot install on a clean device. Also verify
+          # resources.arsc is still stored and 4-byte aligned — R+
+          # refuses the install with error -124 otherwise.
           python3 .github/scripts/strip_required_splits.py --check "$PATCHED_APK"
+          python3 .github/scripts/strip_required_splits.py --check-arsc "$PATCHED_APK"
           ls -la "$PATCHED_APK"
           sha256sum "$PATCHED_APK"
 
