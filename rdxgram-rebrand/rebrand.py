@@ -98,6 +98,32 @@ What it does (only these, nothing else):
      value only has to exist so getText() does not throw, and
      contentDescription strings are never shown on screen.
 
+  D4. resources.arsc alignment (step 2k): Android mmaps
+     resources.arsc, and the entry's data must start on a 4-byte
+     boundary inside the APK. aapt2/apktool put resources.arsc 2nd
+     in the rebuilt APK (misaligned by 1 byte for this content),
+     and LSPatch re-packs the APK in byte-sorted entry order, so
+     the final offset is the sum of every alphabetically-earlier
+     entry (30-byte local header + name + stored size) — a value
+     that changes with the content. The 1.2 build (run
+     43607460321) failed the --check-arsc gate with resources.arsc
+     at 91358969 (mod 4 = 1). zipalign AFTER LSPatch is not an
+     option: LSPatch signs v2-only, and zipalign rewrites the zip,
+     breaking the v2 signature (verified locally on the 1.1 APK:
+     apksigner then reports DOES NOT VERIFY). So 2k adds one tiny
+     asset that aapt2 stores uncompressed and LSPatch keeps stored,
+     sized so the final arsc lands on a 4-byte boundary for the
+     current content: assets/rdx_align_pad.png, 93 bytes (a real
+     1x1 transparent PNG; 30 + 24 + 93 = 147 == 3 mod 4, exactly
+     the +3 the 1.2 content needed). The model was verified
+     exactly: the alphabetical-sum model + a constant K (LSPatch's
+     own added/recompressed entries, measured from the 1.1 build)
+     reproduced the failed 1.2 offset 91358969 byte-for-byte, so
+     the +3 shift is exact, not a guess. If the content changes
+     later and the gate fails again, retune the pad (add/remove 4
+     bytes, or rename) — never relax the gate. The pad is never
+     read by the app.
+
   D. Label string value (step 3): the shrunk label string's value in
      every res/values*/strings.xml becomes "Rdx gram" (belt-and-
      suspenders for the literal manifest labels of 2g). IG 451 has NO
@@ -826,6 +852,28 @@ def main():
             fh.write("\n".join(public_lines) + "\n")
         with open(strings_path, "w", encoding="utf-8") as fh:
             fh.write(strings_text)
+
+    # 2k. resources.arsc alignment pad (see D4): copy the tiny
+    # align-pad PNG (next to this script, committed in the repo)
+    # into assets/ so aapt2 stores it uncompressed and LSPatch
+    # (byte-sorted repack) keeps it stored; its (30 + name +
+    # size) contribution shifts the final resources.arsc data
+    # start onto a 4-byte boundary for the current content.
+    # Missing pad file is fatal — a build without it fails the
+    # --check-arsc gate anyway, and failing here names the cause.
+    pad_src = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "align-pad.png"
+    )
+    pad_dst = os.path.join(decoded, "assets", "rdx_align_pad.png")
+    if not os.path.isfile(pad_src):
+        print("ALIGN_PAD_MISSING: %s not found next to rebrand.py" % pad_src)
+        return 1
+    os.makedirs(os.path.dirname(pad_dst), exist_ok=True)
+    shutil.copyfile(pad_src, pad_dst)
+    changes.append(
+        "arsc align pad assets/rdx_align_pad.png (%d bytes)"
+        % os.path.getsize(pad_dst)
+    )
 
     # 3. Label string value in every values*/strings.xml
     # (belt-and-suspenders for the literal manifest labels of 2g):
