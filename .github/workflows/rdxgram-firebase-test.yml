@@ -1,0 +1,189 @@
+# RdxGram Firebase Test Lab Robo test — real physical ARM phone
+#
+# Purpose (2026-11-14, Hossein approved): run an ALREADY BUILT RdxGram
+# APK through Firebase Test Lab's Robo test on a REAL PHYSICAL Android
+# phone (ARM). This is the only launch test that can be trusted: the
+# x86_64 GitHub emulator cannot run this ARM-only LSPatch APK (its loader
+# picks the x86_64 native lib and crashes at process start — an emulator
+# artifact, not an app bug). A physical ARM phone runs the real arm64 code.
+#
+# Auth: keyless Workload Identity Federation — NO service-account key
+# file exists anywhere. Pool "github-actions" + provider "github" in
+# project rdxgram-test (600953645566); the federated identity for
+# repo:Hosin-rd-x/rdxgram-build:ref:refs/heads/main may impersonate
+# rdxgram-testlab@rdxgram-test.iam.gserviceaccount.com (Firebase Test
+# Lab Admin). Spark plan: 5 physical + 10 virtual runs/day, $0, no card.
+#
+# Trigger: manual only (workflow_dispatch). Input apk_tag picks the release
+# tag; default is the side-by-side build (package com.rdx.gram).
+# The job does NOT fail when the app crashes — a crash is a result, not a
+# CI failure. Verdict lives in ftl-verdict.txt inside the uploaded artifact.
+
+name: RdxGram Firebase Test Lab (real phone)
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_tag:
+        description: "Release tag of the already-built APK to test"
+        required: true
+        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.0"
+      device_model:
+        description: "FTL device model (must be PHYSICAL in the catalog)"
+        required: false
+        default: "panther"
+      device_version:
+        description: "Android API level for the device"
+        required: false
+        default: "34"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  firebase-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # Download the already-built APK FIRST, in a normal step: `gh`
+      # works fine here (the emulator-test workflow showed `gh release
+      # download` fails inside the emulator-runner's script shell even
+      # though the tag exists). The workflow's own GITHUB_TOKEN can read
+      # releases of the same (private) repo; no personal token is used.
+      - name: Download APK to test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p apk
+          gh release download "${{ inputs.apk_tag }}" -p 'Instagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk
+          ls -lh apk
+          APK=$(ls apk/*.apk | head -1)
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          echo "APK_SIZE=$(stat -c%s "$APK")" >> "$GITHUB_ENV"
+          sha256sum apk/*.apk
+
+      - name: Authenticate to Google Cloud (keyless WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: "projects/600953645566/locations/global/workloadIdentityPools/github-actions/providers/github"
+          service_account: "rdxgram-testlab@rdxgram-test.iam.gserviceaccount.com"
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: rdxgram-test
+
+      # The whole point of this workflow is a REAL phone. Refuse to run
+      # on a virtual device or an API level the model does not offer.
+      - name: Verify the device is a real physical phone with this API level
+        run: |
+          gcloud firebase test android models list > models.txt
+          cat models.txt
+          MODEL="${{ inputs.device_model }}"
+          VERSION="${{ inputs.device_version }}"
+          LINE=$(grep -E "^${MODEL}[[:space:]]" models.txt || true)
+          if [ -z "$LINE" ]; then
+            echo "ERROR: device model '$MODEL' is not in the Firebase Test Lab catalog."
+            echo "Check the 'gcloud firebase test android models list' output above and re-run with a valid model."
+            exit 1
+          fi
+          echo "$LINE" | grep -q "PHYSICAL" || { echo "ERROR: model '$MODEL' is a VIRTUAL device, not a real phone. This test needs a real ARM phone."; exit 1; }
+          echo "$LINE" | grep -qE "(^|[^0-9])${VERSION}([^0-9]|$)" || { echo "ERROR: model '$MODEL' does not offer API level $VERSION in this catalog."; exit 1; }
+          echo "Device OK: $LINE"
+
+      # The crash we hunt happens at process start, before any login, so
+      # Robo with no login is correct. A non-zero gcloud exit code is a
+      # RESULT (app crashed / test failed), not a workflow failure — the
+      # verdict is written in the next steps and the job stays green.
+      - name: Run Robo test on the real phone
+        run: |
+          set +e
+          gcloud firebase test android run \
+            --type robo \
+            --app "$APK" \
+            --device "model=${{ inputs.device_model }},version=${{ inputs.device_version }},locale=en,orientation=portrait" \
+            --timeout 5m \
+            --results-history-name "rdxgram" \
+            --results-dir "rdxgram/${{ github.run_id }}" \
+            > ftl-run.log 2>&1
+          echo "FTL_EXIT=$?" >> "$GITHUB_ENV"
+          set -e
+          cat ftl-run.log
+          grep -oE 'https://console\.firebase\.google\.com[^ )"]*' ftl-run.log | sort -u > ftl-console-url.txt || true
+          echo "console URL(s):"
+          cat ftl-console-url.txt || true
+
+      # Raw results (logcat, video, screenshots) live in a Cloud Storage
+      # bucket. `gcloud storage` (not gsutil) is used because gsutil does
+      # not support federated (WIF) credentials reliably. If the identity
+      # lacks storage.objects.get on the results bucket this step only
+      # warns — the console URL above still shows the full results.
+      - name: Download results (logcat, video, screenshots)
+        if: always()
+        run: |
+          BUCKET_URL=$(grep -oE 'https://console\.developers\.google\.com/storage/browser/[^ )"]+' ftl-run.log | head -1 || true)
+          if [ -n "$BUCKET_URL" ]; then
+            GS_PATH=$(echo "$BUCKET_URL" | sed 's#https://console\.developers\.google\.com/storage/browser/#gs://#')
+            echo "Results bucket path: $GS_PATH" | tee ftl-results-path.txt
+            mkdir -p ftl-results
+            if gcloud storage cp -r "$GS_PATH" ftl-results/ 2>&1 | tee ftl-download.log; then
+              echo "Results downloaded."
+            else
+              echo "WARNING: could not download results from GCS with this identity (likely missing storage.objects.get on the results bucket)." | tee -a ftl-download.log
+              echo "The console URL in ftl-console-url.txt still shows the full results." | tee -a ftl-download.log
+            fi
+          else
+            echo "WARNING: no results-bucket URL found in ftl-run.log; nothing to download." | tee ftl-download.log
+          fi
+          find ftl-results -type f 2>/dev/null | head -50 || true
+
+      - name: Write verdict
+        if: always()
+        run: |
+          {
+            echo "apk_tag=${{ inputs.apk_tag }}"
+            echo "apk=$APK size=$APK_SIZE"
+            echo "device=${{ inputs.device_model }} api=${{ inputs.device_version }}"
+            echo "ftl_exit=${FTL_EXIT:-unknown}"
+            echo "console_url=$(head -1 ftl-console-url.txt 2>/dev/null || echo none)"
+            echo ""
+            LOGCAT=$(find ftl-results -iname '*logcat*' -type f 2>/dev/null | head -1 || true)
+            if [ -n "$LOGCAT" ]; then
+              echo "logcat file: $LOGCAT"
+              if grep -q 'FATAL EXCEPTION' "$LOGCAT"; then
+                echo "VERDICT=CRASHED (FATAL EXCEPTION in logcat)"
+                echo ""
+                echo "--- FATAL EXCEPTION (first 60 lines) ---"
+                grep -A 15 'FATAL EXCEPTION' "$LOGCAT" | head -60
+              else
+                echo "VERDICT=LAUNCHED (logcat downloaded, no FATAL EXCEPTION — app survived startup)"
+              fi
+            elif [ "${FTL_EXIT:-1}" = "0" ]; then
+              echo "VERDICT=LAUNCHED (gcloud exit 0; logcat not downloaded — confirm via console URL)"
+            else
+              echo "VERDICT=UNKNOWN (gcloud exit ${FTL_EXIT:-unknown}; logcat not downloaded — check console URL)"
+              echo ""
+              echo "--- failure lines from ftl-run.log ---"
+              grep -iE 'fail|crash|error' ftl-run.log | head -20 || true
+            fi
+          } | tee ftl-verdict.txt
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firebase-test-${{ inputs.apk_tag }}-${{ github.run_id }}
+          path: |
+            ftl-verdict.txt
+            ftl-run.log
+            ftl-console-url.txt
+            ftl-download.log
+            ftl-results-path.txt
+            models.txt
+            ftl-results/
+          if-no-files-found: warn
+          retention-days: 30
