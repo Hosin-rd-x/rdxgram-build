@@ -57,14 +57,22 @@ What it does (only these, nothing else):
      Base.Theme.Instagram defines it as a reference to dimen
      0x7f070263, which is absent, so TypedArray.getDimensionPixelSize
      throws "Failed to resolve attribute ... 0x7f040d3e". 2i repairs
-     the three dimension holes with literal values taken from the
-     matching style/attribute/dimen mapping in the full InstaPro
-     439 APK (same codebase lineage, complete resources):
-     Base.Theme.Instagram tabBarHeight = 48.0dip
-     (@dimen/tab_bar_height_panorama there), Avatar strokeWidth =
-     2.0px (@dimen/circular_avatar_stroke_width), BaseNightTheme and
-     Theme.Instagram mediaViewOuterVerticalMargin = 6.0dip
-     (@dimen/direct_in_thread_composer_top_margin). If a listed
+     the three dimension holes by creating each missing dimen as a
+     REAL dimension resource at its original id (a <dimen> in
+     res/values/rdx_split_dimens.xml + a <public> entry) and pointing
+     the style item at it by REFERENCE (@dimen/...). The values come
+     from the matching style/attribute/dimen mapping in the full
+     InstaPro 439 APK (same codebase lineage, complete resources):
+     dimen 0x7f070263 tab_bar_height_panorama = 48dp (tabBarHeight),
+     0x7f0700e0 circular_avatar_stroke_width = 2px (strokeWidth),
+     0x7f07014b direct_in_thread_composer_top_margin = 6dp
+     (mediaViewOuterVerticalMargin). A LITERAL in the style item
+     would be WRONG: layout inflation (TypedArray) accepts literals,
+     but InstagramMainActivity resolves tabBarHeight with
+     Theme.resolveAttribute and passes TypedValue.resourceId to
+     getDimensionPixelOffset (X/00WF.A0b), and a literal has
+     resourceId 0 — 1.2 crashed exactly that way on relaunch
+     (Redroid run 43610901393: "Resource ID #0x0"). If a listed
      repair is not found in the decoded tree the script fails —
      a build without it cannot launch.
 
@@ -678,41 +686,81 @@ def main():
         )
 
     # 2i. Repair the Play-split dimension holes (see header, section
-    # D2): in res/values/styles.xml, replace the @null value of three
-    # style items with the literal dimension the full app uses.
-    # Scoped to the exact style block, so an unrelated style that
-    # legitimately sets the same attribute to @null is untouched.
-    # A missing repair is fatal: the build cannot launch without it.
+    # D2): create each missing dimen as a REAL dimension resource at
+    # its original id, and point the style item at it by REFERENCE.
+    # (1) the dimen values (in res/values/rdx_split_dimens.xml) and
+    # their <public> entries; (2) the style items in res/values/
+    # styles.xml, scoped to the exact style block so an unrelated
+    # style that legitimately sets the same attribute to @null is
+    # untouched. A missing repair is fatal: the build cannot launch
+    # without it. A LITERAL in the style item would be wrong (see
+    # D2): InstagramMainActivity needs the attribute to resolve to a
+    # resource id (X/00WF.A0b -> getDimensionPixelOffset).
+    split_dimens = [
+        # (dimen id, dimen name, literal value, why)
+        (0x7F070263, "tab_bar_height_panorama", "48dp",
+         "Base.Theme.Instagram tabBarHeight"),
+        (0x7F0700E0, "circular_avatar_stroke_width", "2px",
+         "Avatar strokeWidth"),
+        (0x7F07014B, "direct_in_thread_composer_top_margin", "6dp",
+         "BaseNightTheme/Theme.Instagram mediaViewOuterVerticalMargin"),
+    ]
     split_repairs = [
-        # (style name, attribute name, literal dimension, why)
-        ("Base.Theme.Instagram", "tabBarHeight", "48.0dip",
+        # (style name, attribute name, dimen name, why)
+        ("Base.Theme.Instagram", "tabBarHeight",
+         "tab_bar_height_panorama",
          "main layout tab bar height + container margins"),
-        ("Avatar", "strokeWidth", "2.0px",
+        ("Avatar", "strokeWidth", "circular_avatar_stroke_width",
          "tab-bar profile avatar ring"),
-        ("BaseNightTheme", "mediaViewOuterVerticalMargin", "6.0dip",
+        ("BaseNightTheme", "mediaViewOuterVerticalMargin",
+         "direct_in_thread_composer_top_margin",
          "media view outer margin (dark theme)"),
-        ("Theme.Instagram", "mediaViewOuterVerticalMargin", "6.0dip",
+        ("Theme.Instagram", "mediaViewOuterVerticalMargin",
+         "direct_in_thread_composer_top_margin",
          "media view outer margin (light theme)"),
     ]
+    dimens_path = os.path.join(decoded, "res", "values", "rdx_split_dimens.xml")
+    dimens_lines = ['<?xml version="1.0" encoding="utf-8"?>', "<resources>"]
+    for _rid, name, value, _why in split_dimens:
+        dimens_lines.append('    <dimen name="%s">%s</dimen>' % (name, value))
+    dimens_lines.append("</resources>")
+    with open(dimens_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(dimens_lines) + "\n")
+    public_path = os.path.join(decoded, "res", "values", "public.xml")
+    if not os.path.isfile(public_path):
+        print("SPLIT_REPAIR_MISSING: res/values/public.xml not found")
+        return 1
+    with open(public_path, "r", encoding="utf-8") as fh:
+        public_lines = fh.read().splitlines()
+    for rid, name, _value, _why in split_dimens:
+        try:
+            public_lines = _insert_public_entry(public_lines, "dimen", name, rid)
+        except ValueError as exc:
+            print("SPLIT_REPAIR_CONFLICT: %s" % exc)
+            return 1
+        changes.append("split repair dimen %s -> 0x%08x" % (name, rid))
+    with open(public_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(public_lines) + "\n")
     styles_path = os.path.join(decoded, "res", "values", "styles.xml")
     if not os.path.isfile(styles_path):
         print("SPLIT_REPAIR_MISSING: res/values/styles.xml not found")
         return 1
     with open(styles_path, "r", encoding="utf-8") as fh:
         styles_text = fh.read()
-    for style_name, attr_name, literal, why in split_repairs:
+    for style_name, attr_name, dimen_name, why in split_repairs:
+        ref = "@dimen/" + dimen_name
         block_re = re.compile(
             r'(<style\s+name="' + re.escape(style_name) + r'"[^>]*>)(.*?)(</style>)',
             re.DOTALL,
         )
 
-        def _repair_block(m, attr_name=attr_name, literal=literal):
+        def _repair_block(m, attr_name=attr_name, ref=ref):
             head, body, tail = m.group(1), m.group(2), m.group(3)
             item_re = re.compile(
                 r'(<item\s+name="' + re.escape(attr_name) + r'"[^>]*>)@null(</item>)'
             )
             new_body, n = item_re.subn(
-                lambda im: im.group(1) + literal + im.group(2), body, count=1
+                lambda im: im.group(1) + ref + im.group(2), body, count=1
             )
             if n == 0:
                 return m.group(0)
@@ -730,7 +778,7 @@ def main():
             return 1
         changes.append(
             "split repair %s/%s -> %s (%s)"
-            % (style_name, attr_name, literal, why)
+            % (style_name, attr_name, ref, why)
         )
     with open(styles_path, "w", encoding="utf-8") as fh:
         fh.write(styles_text)

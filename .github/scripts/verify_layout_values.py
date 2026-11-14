@@ -22,9 +22,17 @@ library only and asserts, for a rebuilt or LSPatch-patched APK:
   - the app label string 0x7f130009 resolves to "Rdx gram";
   - attr 0x7f040d3e (tabBarHeight) is present;
   - the Play-split dimension repairs (rebrand step 2i) are present
-    as literal dimensions in their styles: Base.Theme.Instagram
-    tabBarHeight = 48dp, Avatar strokeWidth = 2px, BaseNightTheme
-    and Theme.Instagram mediaViewOuterVerticalMargin = 6dp;
+    as REAL dimension resources at their original ids, with the
+    style items pointing at them by reference: dimen 0x7f070263
+    tab_bar_height_panorama = 48dp (Base.Theme.Instagram
+    tabBarHeight), 0x7f0700e0 circular_avatar_stroke_width = 2px
+    (Avatar strokeWidth), 0x7f07014b direct_in_thread_composer_
+    top_margin = 6dp (BaseNightTheme and Theme.Instagram
+    mediaViewOuterVerticalMargin). A literal in the style item
+    would be WRONG: InstagramMainActivity resolves tabBarHeight
+    with Theme.resolveAttribute and passes TypedValue.resourceId
+    to getDimensionPixelOffset, and a literal has resourceId 0
+    (1.2 crashed that way on relaunch, Redroid 43610901393).
   - the Play-split drawable/string restores (rebrand step 2j) are
     present at their ORIGINAL ids: the six drawables the main
     activity's bundled layouts need (verified_profile,
@@ -205,9 +213,13 @@ def main():
           f"{(0x04, 0x0D3E) in entries}")
     print(f"per-type counts: {dict(per_type)}")
 
-    # The Play-split dimension repairs (rebrand step 2i): the style
-    # items must hold real dimensions, not a dangling reference.
-    # style (type 0x14) name -> {attr name: (value, unit)}
+    # The Play-split dimension repairs (rebrand step 2i): each
+    # style item must be a REFERENCE to the restored dimen id (a
+    # literal would give resourceId 0 through resolveAttribute),
+    # and the dimen id itself must hold the literal value.
+    # style (type 0x14) name -> {attr name: (value, unit)} or
+    # ("ref", hex id); dimen entries are (type 0x07) with dtype
+    # 0x05 (TYPE_DIMENSION) and the complex value.
     style_attrs = {}
     for (tid, eid), items in style_bags.items():
         tname, sname, _d, _v = entries[(tid, eid)]
@@ -226,16 +238,26 @@ def main():
                 attrs[attr_name] = (f"type {mdtype:#x}", mvdata)
         style_attrs[sname] = attrs
     repairs = [
-        ("Base.Theme.Instagram", "tabBarHeight", 48.0, "dp"),
-        ("Avatar", "strokeWidth", 2.0, "px"),
-        ("BaseNightTheme", "mediaViewOuterVerticalMargin", 6.0, "dp"),
-        ("Theme.Instagram", "mediaViewOuterVerticalMargin", 6.0, "dp"),
+        # (style, attr, dimen entry id, value, unit)
+        ("Base.Theme.Instagram", "tabBarHeight", 0x0263, 48.0, "dp"),
+        ("Avatar", "strokeWidth", 0x00E0, 2.0, "px"),
+        ("BaseNightTheme", "mediaViewOuterVerticalMargin", 0x014B, 6.0, "dp"),
+        ("Theme.Instagram", "mediaViewOuterVerticalMargin", 0x014B, 6.0, "dp"),
     ]
     repair_values = {}
-    for style_name, attr_name, _want, _unit in repairs:
+    dimen_values = {}
+    for style_name, attr_name, did, _want, _unit in repairs:
         got = style_attrs.get(style_name, {}).get(attr_name)
         repair_values[(style_name, attr_name)] = got
         print(f"split repair {style_name}/{attr_name} -> {got!r}")
+        if did not in dimen_values:
+            e = entries.get((0x07, did))
+            if e is None or e[2] != 0x05:
+                dimen_values[did] = None
+            else:
+                dimen_values[did] = decode_dimension(e[3])
+            print(f"split repair dimen 0x7f07{did:04x} "
+                  f"{e[1] if e else None} -> {dimen_values[did]!r}")
 
     # The Play-split drawable/string restores (rebrand step 2j):
     # each id must exist at its ORIGINAL id and resolve to the
@@ -291,14 +313,24 @@ def main():
         failures.append(f"LABEL_WRONG: 0x7f130009 resolves to {label!r}")
     if (0x04, 0x0D3E) not in entries:
         failures.append("ATTR_TABBARHEIGHT_MISSING: 0x7f040d3e absent")
-    for style_name, attr_name, want, unit in repairs:
+    for style_name, attr_name, did, want, unit in repairs:
         got = repair_values[(style_name, attr_name)]
-        if got is None or got != (want, unit):
+        want_ref = ("ref", f"0x7f07{did:04x}")
+        if got != want_ref:
             failures.append(
                 f"SPLIT_REPAIR_WRONG: {style_name}/{attr_name} is "
-                f"{got!r}, expected ({want}, {unit!r}) — the base APK "
-                "is missing this Play-split dimension and launch will "
-                "fail resolving it"
+                f"{got!r}, expected a reference {want_ref!r} — a "
+                "literal here gives resourceId 0 through "
+                "Theme.resolveAttribute and the relaunch dies with "
+                "'Resource ID #0x0'"
+            )
+        got_dim = dimen_values[did]
+        if got_dim is None or got_dim != (want, unit):
+            failures.append(
+                f"SPLIT_REPAIR_WRONG: dimen 0x7f07{did:04x} is "
+                f"{got_dim!r}, expected ({want}, {unit!r}) — the "
+                "base APK is missing this Play-split dimension and "
+                "launch will fail resolving it"
             )
     for eid, name in split_drawables:
         got = restore_values[("drawable", eid)]
