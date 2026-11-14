@@ -98,7 +98,11 @@ jobs:
           if ! command -v adb >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y adb; fi
           adb version
           IMAGE=""
-          for TAG in 13.0.0_64only-arm64 14.0.0_64only-arm64 11.0.0_64only-arm64; do
+          # Tag scheme verified on Docker Hub (2026-11-14): the arm64-only
+          # images are named <ver>_64only-latest (e.g. 13.0.0_64only-latest,
+          # multi-arch amd64+arm64). There is NO -arm64 suffix — that was
+          # the "manifest unknown" failure in probe run 43595377933.
+          for TAG in 13.0.0_64only-latest 14.0.0_64only-latest 15.0.0_64only-latest; do
             if docker pull "redroid/redroid:$TAG"; then IMAGE="redroid/redroid:$TAG"; break; fi
           done
           if [ -z "$IMAGE" ]; then echo "NO_REDROID_IMAGE" > status.txt; exit 0; fi
