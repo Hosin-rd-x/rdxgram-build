@@ -5,6 +5,12 @@
 # assigned in one line do NOT survive to the next (run 43587905951
 # proved it: TAG was empty in the `gh release download` line).
 #
+# The APK is downloaded by a normal workflow step BEFORE the emulator
+# starts (gh works fine there); this script only installs the file that
+# is already in apk/. It does NOT download anything itself — `gh release
+# download` inside the runner's script shell failed with "release not
+# found" in run 43588243927 even though the tag exists.
+#
 # Usage: emulator-test.sh <release-tag>
 # Writes status.txt / logcat.txt / screen.png in the current directory.
 # Always exits 0: an app crash (or install failure) is a TEST RESULT,
@@ -14,23 +20,15 @@ TAG="${1:-instagram-451.0.0.53.80-rdxgram-theme-1.0}"
 PKG="com.instagram.android"
 
 echo "apk_tag=$TAG"
-mkdir -p apk
-if ! gh release download "$TAG" -p 'Instagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk; then
-  echo "DOWNLOAD_FAILED" > status.txt
-  echo "tag=$TAG" >> status.txt
-  echo "reason=gh release download failed for tag $TAG" >> status.txt
-  adb logcat -d > logcat.txt 2>/dev/null || true
-  adb exec-out screencap -p > screen.png 2>/dev/null || true
-  echo "DOWNLOAD FAILED — see status.txt"
-  exit 0
-fi
-ls -la apk
+ls -la apk 2>/dev/null || true
 APK=$(ls apk/Instagram-*.apk 2>/dev/null | head -n1)
 if [ -z "$APK" ]; then
   echo "DOWNLOAD_FAILED" > status.txt
   echo "tag=$TAG" >> status.txt
-  echo "reason=no Instagram-*.apk asset in release $TAG" >> status.txt
+  echo "reason=no Instagram-*.apk file in apk/ (download step did not produce one)" >> status.txt
   adb logcat -d > logcat.txt 2>/dev/null || true
+  adb exec-out screencap -p > screen.png 2>/dev/null || true
+  echo "DOWNLOAD FAILED — see status.txt"
   exit 0
 fi
 echo "apk=$APK size=$(stat -c%s "$APK")"
