@@ -47,6 +47,20 @@ jobs:
       # Android SDK (ANDROID_HOME=/usr/local/lib/android/sdk, cmdline-tools
       # 20.0), which android-emulator-runner uses directly.
 
+      # KVM fix (run 43586606474): /dev/kvm EXISTS on the GitHub runner,
+      # but the runner user is not in the kvm group, so the action
+      # disabled hardware acceleration ("Disabling Linux hardware
+      # acceleration", emulator started with `-accel off`) and the
+      # software-emulated boot timed out after 600s. Making the kvm
+      # device world-accessible is the fix documented in the
+      # android-emulator-runner's own README. With KVM the boot is fast.
+      - name: Enable KVM device access
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
       - name: Install APK on emulator and watch it launch
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -55,6 +69,7 @@ jobs:
           arch: x86_64
           profile: pixel_7
           ram-size: 4096M
+          emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             set -x
