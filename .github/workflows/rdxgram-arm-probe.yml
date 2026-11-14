@@ -14,7 +14,7 @@
 #
 # Step 1 (always runs): probe the runner kernel for Android binder/ashmem.
 # If binder loads (either /dev/binder or a binderfs mount), steps 2+3 boot
-# Redroid, install the APK, launch it with monkey, wait 45s, capture pid +
+# Redroid, install the APK, launch it with `am start`, wait 45s, capture pid +
 # logcat. If neither /dev/binder nor binderfs appears, the Redroid path is
 # dead and we stop after step 1 (status.txt = BINDER_MISSING).
 
@@ -78,6 +78,7 @@ jobs:
           : > crash.txt
           : > pid.txt
           : > boot-diag.txt
+          : > launch.txt
           echo "binder_present=$BINDER"
 
       - name: Download APK to test
@@ -144,7 +145,27 @@ jobs:
           adb install -r apk/Instagram-*.apk || echo "adb install failed (see above)"
           if adb shell pm list packages 2>/dev/null | grep -q com.instagram.android; then
             echo "installed" | tee -a status.txt
-            adb shell monkey -p com.instagram.android -c android.intent.category.LAUNCHER 1 || true
+            # Launch with `am start`, not monkey: monkey exits -5 without
+            # launching anything on Redroid 13 (probe run 43596433654 — it
+            # aborted right after "SYS_KEYS has no physical keys" and no
+            # Instagram process ever started). Give the PackageManager a
+            # moment to index the freshly installed package, resolve the
+            # launcher activity, then start it explicitly.
+            sleep 20
+            echo "== launcher activity ==" | tee launch.txt
+            LAUNCHER=""
+            for i in $(seq 1 6); do
+              LAUNCHER=$(adb shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.instagram.android 2>/dev/null | tr -d '\r' | tail -1)
+              [ -n "$LAUNCHER" ] && break
+              sleep 5
+            done
+            echo "launcher=$LAUNCHER" | tee -a launch.txt
+            if [ -n "$LAUNCHER" ]; then
+              adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n "$LAUNCHER" 2>&1 | tee -a launch.txt || true
+            else
+              echo "no launcher activity resolved, trying implicit intent" | tee -a launch.txt
+              adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.instagram.android 2>&1 | tee -a launch.txt || true
+            fi
             sleep 45
             adb shell pidof com.instagram.android > pid.txt 2>&1 || echo "not-running" > pid.txt
             adb logcat -d > logcat.txt
@@ -177,4 +198,5 @@ jobs:
             crash.txt
             pid.txt
             boot-diag.txt
+            launch.txt
           retention-days: 30
