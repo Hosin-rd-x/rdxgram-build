@@ -1,0 +1,133 @@
+# RdxGram ARM probe — can Redroid (native ARM Android in Docker) run on a
+# GitHub ubuntu-24.04-arm runner, and does the RdxGram theme 1.1 APK launch
+# in it?
+#
+# Why this exists: the APK is arm64-only. On the x86_64 emulator it installs
+# fine, but launch crashes at process start because the LSPatch loader picks
+# the x86_64 native library while the process runs under ARM translation —
+# that crash is the emulator's, not the app's. A native ARM run tells the
+# truth about whether the app really launches.
+#
+# Trigger: manual only (workflow_dispatch). Input apk_tag defaults to the
+# theme 1.1 release. The job does NOT fail when the app crashes — a crash is
+# a result, not a CI failure. Verdict lives in status.txt in the artifact.
+#
+# Step 1 (always runs): probe the runner kernel for Android binder/ashmem.
+# Step 2+3 (only if binder loads): boot Redroid, install the APK, launch it
+# with monkey, wait 45s, capture pid + logcat. If binder does not load, the
+# Redroid path is dead and we stop after step 1 (status.txt = BINDER_MISSING).
+
+name: RdxGram ARM probe (Redroid on ubuntu-24.04-arm)
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_tag:
+        description: "Release tag of the already-built APK to test"
+        required: true
+        default: "instagram-451.0.0.53.80-rdxgram-theme-1.1"
+
+permissions:
+  contents: read
+
+jobs:
+  arm-probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Probe binder / ashmem
+        id: binder
+        run: |
+          echo "== kernel =="; uname -a
+          echo "== /dev/binder* =="; ls -l /dev/binder* 2>&1 || true
+          echo "== loaded modules =="; lsmod | grep -E 'binder|ashmem' || echo "no binder/ashmem modules loaded"
+          echo "== modprobe binder_linux =="
+          if sudo modprobe binder_linux 2>&1; then echo "binder_linux modprobe: OK"; else echo "binder_linux modprobe: FAILED"; fi
+          echo "== modprobe ashmem_linux =="
+          if sudo modprobe ashmem_linux 2>&1; then echo "ashmem_linux modprobe: OK"; else echo "ashmem_linux modprobe: FAILED"; fi
+          ls -l /dev/binder* 2>&1 || true
+          if [ ! -e /dev/binder ]; then
+            echo "== binder still missing, trying linux-modules-extra =="
+            sudo apt-get update -qq 2>&1 | tail -2 || true
+            sudo apt-get install -y linux-modules-extra-$(uname -r) 2>&1 | tail -5 || true
+            sudo modprobe binder_linux 2>&1 || true
+            sudo modprobe ashmem_linux 2>&1 || true
+            ls -l /dev/binder* 2>&1 || true
+          fi
+          echo "== final module state =="; lsmod | grep -E 'binder|ashmem' || echo "still no binder/ashmem modules"
+          BINDER=no
+          if [ -e /dev/binder ]; then BINDER=yes; fi
+          echo "binder_present=$BINDER" >> "$GITHUB_OUTPUT"
+          echo "BINDER_PRESENT=$BINDER" > binder.txt
+          if [ "$BINDER" = "no" ]; then echo "BINDER_MISSING" > status.txt; else echo "BINDER_PRESENT" > status.txt; fi
+          : > logcat.txt
+          : > crash.txt
+          : > pid.txt
+          echo "binder_present=$BINDER"
+
+      - name: Download APK to test
+        if: steps.binder.outputs.binder_present == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y gh; fi
+          mkdir -p apk
+          gh release download "${{ inputs.apk_tag }}" -p 'Instagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk
+          ls -la apk
+          sha256sum apk/*.apk
+
+      - name: Boot Redroid and test the APK
+        if: steps.binder.outputs.binder_present == 'yes'
+        run: |
+          set -x
+          docker --version
+          if ! command -v adb >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y adb; fi
+          adb version
+          IMAGE=""
+          for TAG in 13.0.0_64only-arm64 14.0.0_64only-arm64 11.0.0_64only-arm64; do
+            if docker pull "redroid/redroid:$TAG"; then IMAGE="redroid/redroid:$TAG"; break; fi
+          done
+          if [ -z "$IMAGE" ]; then echo "NO_REDROID_IMAGE" > status.txt; exit 0; fi
+          echo "using image $IMAGE" | tee -a status.txt
+          docker run -d --privileged --name redroid -p 5555:5555 "$IMAGE"
+          for i in $(seq 1 60); do
+            adb connect localhost:5555 2>&1 | grep -q "connected" && break
+            sleep 5
+          done
+          adb devices
+          adb wait-for-device
+          for i in $(seq 1 60); do
+            BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$BOOT" = "1" ] && break
+            sleep 5
+          done
+          adb shell getprop sys.boot_completed || true
+          adb install -r apk/Instagram-*.apk
+          adb shell monkey -p com.instagram.android -c android.intent.category.LAUNCHER 1
+          sleep 45
+          adb shell pidof com.instagram.android > pid.txt 2>&1 || echo "not-running" > pid.txt
+          adb logcat -d > logcat.txt
+          if grep -q "FATAL EXCEPTION" logcat.txt; then
+            echo "CRASHED" > status.txt
+          elif [ -s pid.txt ] && [ "$(cat pid.txt)" != "not-running" ]; then
+            echo "RUNNING" > status.txt
+          else
+            echo "NOT_RUNNING_NO_FATAL" > status.txt
+          fi
+          grep -B2 -A 40 "FATAL EXCEPTION" logcat.txt | head -80 > crash.txt || true
+          echo "=== status ==="; cat status.txt
+          echo "=== pid ==="; cat pid.txt
+          echo "=== crash excerpt ==="; cat crash.txt
+
+      - name: Upload probe results (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdxgram-arm-probe
+          path: |
+            binder.txt
+            status.txt
+            logcat.txt
+            crash.txt
+            pid.txt
+          retention-days: 30
