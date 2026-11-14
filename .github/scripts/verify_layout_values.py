@@ -24,7 +24,13 @@ library only and asserts, for a rebuilt or LSPatch-patched APK:
   - the Play-split dimension repairs (rebrand step 2i) are present
     as literal dimensions in their styles: Base.Theme.Instagram
     tabBarHeight = 48dp, Avatar strokeWidth = 2px, BaseNightTheme
-    and Theme.Instagram mediaViewOuterVerticalMargin = 6dp.
+    and Theme.Instagram mediaViewOuterVerticalMargin = 6dp;
+  - the Play-split drawable/string restores (rebrand step 2j) are
+    present at their ORIGINAL ids: the six drawables the main
+    activity's bundled layouts need (verified_profile,
+    instagram_chevron_down_pano_filled_12, instagram_x_pano_
+    outline_8, instagram_call_pano_filled_12, from_meta_
+    attribution, instagram) and the six placeholder strings.
 
 Usage: verify_layout_values.py <apk>
 Exits 0 when every check passes, 1 otherwise.
@@ -231,6 +237,39 @@ def main():
         repair_values[(style_name, attr_name)] = got
         print(f"split repair {style_name}/{attr_name} -> {got!r}")
 
+    # The Play-split drawable/string restores (rebrand step 2j):
+    # each id must exist at its ORIGINAL id and resolve to the
+    # restored file path / string value.
+    split_drawables = [
+        # entry ids (the 0x7f08 type prefix is added by resolve())
+        (0x31D1, "verified_profile"),
+        (0x2330, "instagram_chevron_down_pano_filled_12"),
+        (0x2A1D, "instagram_x_pano_outline_8"),
+        (0x22CC, "instagram_call_pano_filled_12"),
+        (0x1E6B, "from_meta_attribution"),
+        (0x2190, "instagram"),
+    ]
+    split_strings = [
+        # entry ids (the 0x7f13 type prefix is added by resolve())
+        (0x45B2, "rdx_split_string_back", "Back"),
+        (0x45B8, "rdx_split_string_45b8", ""),
+        (0x1DF7, "rdx_split_string_1df7", ""),
+        (0x7F67, "rdx_split_string_37f67", ""),
+        (0x8FCC, "rdx_split_string_8fcc", ""),
+        (0x8FCD, "rdx_split_string_8fcd", ""),
+    ]
+    restore_values = {}
+    for eid, name in split_drawables:
+        got = resolve(entries, main_sp, 0x08, eid)
+        restore_values[("drawable", eid)] = got
+        print(f"split restore drawable 0x7f08{eid:04x} {name} -> "
+              f"{got!r}")
+    for eid, name, _want in split_strings:
+        got = resolve(entries, main_sp, 0x13, eid)
+        restore_values[("string", eid)] = got
+        print(f"split restore string 0x7f13{eid:04x} {name} -> "
+              f"{got!r}")
+
     failures = []
     if main_layout is None or not main_layout.startswith("L|"):
         failures.append(
@@ -260,6 +299,24 @@ def main():
                 f"{got!r}, expected ({want}, {unit!r}) — the base APK "
                 "is missing this Play-split dimension and launch will "
                 "fail resolving it"
+            )
+    for eid, name in split_drawables:
+        got = restore_values[("drawable", eid)]
+        if not got or name not in got:
+            failures.append(
+                f"SPLIT_RESTORE_WRONG: drawable 0x7f08{eid:04x} "
+                f"({name}) resolves to {got!r} — the bundled layouts "
+                "reference this id directly and launch will fail "
+                "with NotFoundException"
+            )
+    for eid, name, want in split_strings:
+        got = restore_values[("string", eid)]
+        if got != want:
+            failures.append(
+                f"SPLIT_RESTORE_WRONG: string 0x7f13{eid:04x} "
+                f"({name}) resolves to {got!r}, expected "
+                f"{want!r} — a bundled layout calls getText() on "
+                "this id at inflation"
             )
     if failures:
         for f in failures:

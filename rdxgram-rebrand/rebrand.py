@@ -68,6 +68,36 @@ What it does (only these, nothing else):
      repair is not found in the decoded tree the script fails —
      a build without it cannot launch.
 
+  D3. Play-split drawables and strings (step 2j): the same split
+     also holds drawables and strings the main activity's bundled
+     layouts need. The bundled layout loader (layouts.bin) references
+     them by resource id, so 2j restores each one at its ORIGINAL id
+     (a <public> entry + the file, or the strings.xml value): 1.1
+     crashed on Redroid 43606156665 with NotFoundException "Drawable
+     (missing name) with resource ID #0x7f0831d1" while inflating
+     IgSimpleImageView at line 103 of layout_action_bar_new_title_
+     container. The missing ids were found by auditing the bundled
+     layouts the main activity inflates (layouts.bin, decompressed
+     from assets/layouts.bin.spo, XZ stream verified against
+     layouts.bin.sha256) and cross-checking each one against the
+     full InstaPro 439 APK (same codebase lineage): the drawable at
+     each hole sits between the same alphabetical neighbours in
+     both tables, and InstaPro's own bundled layouts show the same
+     element with the same name. Restored drawables:
+     0x7f0831d1 verified_profile, 0x7f082330 instagram_chevron_down_
+     pano_filled_12, 0x7f082a1d instagram_x_pano_outline_8,
+     0x7f0822cc instagram_call_pano_filled_12, 0x7f081e6b from_meta_
+     attribution, 0x7f082190 instagram (the splash logo, 109dp).
+     Their files live in rdxgram-rebrand/split-drawables/ (PNG/WebP
+     copied from the full InstaPro 439 APK — Instagram's own icon
+     files, same lineage as the base APK). Restored strings are
+     server-downloaded (DownloadedIgResources) so their names and
+     values are in no APK's resource table; they are restored with
+     placeholder names (rdx_split_string_*) and values ('Back' for
+     the back button's contentDescription, empty otherwise) — the
+     value only has to exist so getText() does not throw, and
+     contentDescription strings are never shown on screen.
+
   D. Label string value (step 3): the shrunk label string's value in
      every res/values*/strings.xml becomes "Rdx gram" (belt-and-
      suspenders for the literal manifest labels of 2g). IG 451 has NO
@@ -165,8 +195,55 @@ def _existing_layouts(decoded):
     return names
 
 
+def _insert_public_entry(lines, rtype, name, rid):
+    """Insert '<public type=... name=... id=... />' into public.xml
+    lines, in id order among the entries of the same type. Returns
+    the new list of lines. Raises ValueError on a conflicting entry
+    (same id with a different name, or same name with a different
+    id); returns the lines unchanged if the exact entry is already
+    present (idempotent)."""
+    pat = re.compile(
+        r'<public\s+type="([^"]+)"\s+name="([^"]+)"\s+id="(0x[0-9a-fA-F]+)"\s*/>'
+    )
+    entry = (
+        '    <public type="%s" name="%s" id="0x%08x" />'
+        % (rtype, name, rid)
+    )
+    same_type = []
+    for idx, line in enumerate(lines):
+        m = pat.search(line)
+        if not m:
+            continue
+        t, n, i = m.group(1), m.group(2), int(m.group(3), 16)
+        if t != rtype:
+            continue
+        if i == rid and n == name:
+            return lines
+        if i == rid:
+            raise ValueError(
+                "public id 0x%08x already used by %s/%s" % (rid, t, n)
+            )
+        if n == name:
+            raise ValueError(
+                "public %s/%s already has id 0x%08x" % (t, n, i)
+            )
+        same_type.append((idx, i))
+    insert_at = len(lines)
+    for idx, i in reversed(same_type):
+        if i < rid:
+            insert_at = idx + 1
+            break
+    else:
+        if same_type:
+            insert_at = same_type[0][0]
+    lines = list(lines)
+    lines.insert(insert_at, entry)
+    return lines
+
+
 def main():
     decoded, icons_dir = sys.argv[1], sys.argv[2]
+    split_dir = sys.argv[3] if len(sys.argv) > 3 else None
     manifest_path = os.path.join(decoded, "AndroidManifest.xml")
     if not os.path.isfile(manifest_path):
         print("MANIFEST_MISSING: " + manifest_path)
@@ -650,6 +727,105 @@ def main():
         )
     with open(styles_path, "w", encoding="utf-8") as fh:
         fh.write(styles_text)
+
+    # 2j. Restore the Play-split drawables and strings the main
+    # activity's bundled layouts need (see header, section D3).
+    # Each resource is restored at its ORIGINAL id, because the
+    # bundled layouts reference the ids directly.
+    split_drawables = [
+        # (resource id, drawable name)
+        (0x7F0831D1, "verified_profile"),
+        (0x7F082330, "instagram_chevron_down_pano_filled_12"),
+        (0x7F082A1D, "instagram_x_pano_outline_8"),
+        (0x7F0822CC, "instagram_call_pano_filled_12"),
+        (0x7F081E6B, "from_meta_attribution"),
+        (0x7F082190, "instagram"),
+    ]
+    split_strings = [
+        # (resource id, placeholder name, placeholder value)
+        (0x7F1345B2, "rdx_split_string_back", "Back"),
+        (0x7F1345B8, "rdx_split_string_45b8", ""),
+        (0x7F131DF7, "rdx_split_string_1df7", ""),
+        (0x7F137F67, "rdx_split_string_37f67", ""),
+        (0x7F138FCC, "rdx_split_string_8fcc", ""),
+        (0x7F138FCD, "rdx_split_string_8fcd", ""),
+    ]
+    if split_dir is None:
+        changes.append("2j SKIPPED: no split-drawables dir given "
+                       "(pass it as the 3rd argument)")
+    else:
+        public_path = os.path.join(decoded, "res", "values",
+                                   "public.xml")
+        if not os.path.isfile(public_path):
+            print("SPLIT_RESTORE_MISSING: res/values/public.xml "
+                  "not found")
+            return 1
+        with open(public_path, "r", encoding="utf-8") as fh:
+            public_lines = fh.read().splitlines()
+        for rid, name in split_drawables:
+            copied = []
+            for dens in sorted(os.listdir(split_dir)):
+                if not dens.startswith("drawable-"):
+                    continue
+                for fname in sorted(os.listdir(
+                        os.path.join(split_dir, dens))):
+                    if fname.rsplit(".", 1)[0] != name:
+                        continue
+                    src = os.path.join(split_dir, dens, fname)
+                    dst_dir = os.path.join(decoded, "res", dens)
+                    os.makedirs(dst_dir, exist_ok=True)
+                    dst = os.path.join(dst_dir, fname)
+                    with open(src, "rb") as fh:
+                        blob = fh.read()
+                    with open(dst, "wb") as fh:
+                        fh.write(blob)
+                    copied.append("%s/%s" % (dens, fname))
+            if not copied:
+                print("SPLIT_RESTORE_MISSING: no file for drawable "
+                      "%s (0x%08x) in %s" % (name, rid, split_dir))
+                return 1
+            try:
+                public_lines = _insert_public_entry(
+                    public_lines, "drawable", name, rid)
+            except ValueError as exc:
+                print("SPLIT_RESTORE_CONFLICT: %s" % exc)
+                return 1
+            changes.append(
+                "split restore drawable %s -> 0x%08x (%s)"
+                % (name, rid, ", ".join(copied))
+            )
+        strings_path = os.path.join(decoded, "res", "values",
+                                    "strings.xml")
+        with open(strings_path, "r", encoding="utf-8") as fh:
+            strings_text = fh.read()
+        for rid, name, value in split_strings:
+            try:
+                public_lines = _insert_public_entry(
+                    public_lines, "string", name, rid)
+            except ValueError as exc:
+                print("SPLIT_RESTORE_CONFLICT: %s" % exc)
+                return 1
+            if ('<string name="%s"' % name) in strings_text:
+                print("SPLIT_RESTORE_CONFLICT: string %s already "
+                      "defined in res/values/strings.xml" % name)
+                return 1
+            marker = "</resources>"
+            new_item = ('    <string name="%s">%s</string>\n'
+                        % (name, _xml_escape(value)))
+            if marker not in strings_text:
+                print("SPLIT_RESTORE_MISSING: </resources> not found "
+                      "in res/values/strings.xml")
+                return 1
+            strings_text = strings_text.replace(
+                marker, new_item + marker, 1)
+            changes.append(
+                "split restore string %s -> 0x%08x (value %r)"
+                % (name, rid, value)
+            )
+        with open(public_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(public_lines) + "\n")
+        with open(strings_path, "w", encoding="utf-8") as fh:
+            fh.write(strings_text)
 
     # 3. Label string value in every values*/strings.xml
     # (belt-and-suspenders for the literal manifest labels of 2g):
