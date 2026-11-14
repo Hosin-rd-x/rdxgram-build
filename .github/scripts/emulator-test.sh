@@ -16,8 +16,7 @@
 # Always exits 0: an app crash (or install failure) is a TEST RESULT,
 # not a CI failure — verdict lives in status.txt.
 
-TAG="${1:-instagram-451.0.0.53.80-rdxgram-theme-1.0}"
-PKG="com.instagram.android"
+TAG="${1:-instagram-451.0.0.53.80-rdxgram-theme-1.1}"
 
 echo "apk_tag=$TAG"
 ls -la apk 2>/dev/null || true
@@ -32,6 +31,21 @@ if [ -z "$APK" ]; then
   exit 0
 fi
 echo "apk=$APK size=$(stat -c%s "$APK")"
+
+# The APK's package is NOT always com.instagram.android: the side-by-side
+# build is com.rdx.gram. The test script used to hardcode
+# com.instagram.android, so run 43596343821 monkeyed a package that was
+# never installed ("** No activities found to run, monkey aborted") and
+# the pidof check then wrote a bogus CRASHED verdict for an app that was
+# never launched. Derive the package from the APK's own manifest
+# (verify_apk_manifest.py is checked out with this repo and reads LSPatch
+# output fine); fall back to the theme package if the parse fails.
+PKG="com.instagram.android"
+DETECTED=$(python3 .github/scripts/verify_apk_manifest.py "$APK" 2>/dev/null | sed -n 's/^package=\([^ ]*\).*/\1/p')
+if [ -n "$DETECTED" ]; then
+  PKG="$DETECTED"
+fi
+echo "package=$PKG (from APK manifest)"
 
 # Clear the log so the dump is mostly about this launch.
 adb logcat -c 2>/dev/null || true
@@ -56,6 +70,7 @@ else
   echo "CRASHED" > status.txt
 fi
 echo "tag=$TAG" >> status.txt
+echo "package=$PKG" >> status.txt
 echo "apk=$(basename "$APK")" >> status.txt
 echo "apk_size=$(stat -c%s "$APK")" >> status.txt
 echo "checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> status.txt
