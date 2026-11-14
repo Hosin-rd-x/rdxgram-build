@@ -1,45 +1,65 @@
 # Build a ready-to-install Instagram + RdxGram Theme APK with LSPatch (no root)
 #
-# Same base as instaeclipse.yml / instaeclipse-glass.yml (stock Instagram
-# 451.0.0.53.80 supplied by Hossein, release instagram-451.0.0.53.80-stock,
-# SHA-256 verified there), but the embedded module is the new standalone
-# RdxGram Theme module built from source in THIS repo (rdxgram-theme/):
-#   - Kotlin + legacy Xposed API only (api-82.jar, compileOnly), one entry
-#     (assets/xposed_init + META-INF/xposed/init, minVersion 82) — the
-#     smallest possible surface after the previous glass build crashed on
-#     the phone for an unknown reason.
-#   - Inter variable font (free, SIL OFL 1.1, google/fonts) bundled in the
-#     module; replaces only the system sans-serif family.
-#   - Floating translucent capsule bottom bar + selected-tab pill (ported
-#     GlassTabBarHook). NO real backdrop blur — a RenderEffect on the bar
-#     itself would blur the bar's own icons, not the backdrop; the look is
-#     a translucent capsule, and the release notes say so plainly.
-#   - Settings app (same APK, installable standalone) with two switches
-#     read through an exported read-only ContentProvider; defaults ON.
-#   - LSPatch 1.0 CLI jar, same as instaeclipse.yml.
+# Why 1.2 is a different pipeline from 1.1 (root cause of the 1.1 crash):
+#   Theme 1.1 installed fine and LSPatch bootstrapped, the module loaded
+#   ("font loaded: Inter variable"), MainTabActivity displayed — then
+#   ~2.5 s later InstagramMainActivity died inflating its layout:
+#   "Failed to resolve attribute at index 6: TypedValue{t=0x2/d=0x7f040d3e}"
+#   (Redroid runs 43597148756 and 43603677487, same crash twice).
+#   0x7f040d3e is attr/tabBarHeight (the old "abc_grow_fade_in_from_bottom"
+#   name came from a buggy resolver that read entry offsets at
+#   entriesStart; the correct parser reads them at headerSize). The
+#   activity theme Base.Theme.Instagram defines tabBarHeight as a
+#   reference to dimen 0x7f070263 (tab_bar_height_panorama), and that
+#   dimen is ABSENT from the stock single base APK: stock Instagram 451
+#   is a Play-bundle build whose density config split holds it (and 4
+#   more dimens + ~129 drawables). With the reference dangling, theme
+#   resolution returns the unresolved attribute and
+#   TypedArray.getDimensionPixelSize throws. A LITERAL 48dp in the style
+#   item is also wrong (side-by-side 1.2 crashed that way, Redroid run
+#   43610901393, "Resource ID #0x0": InstagramMainActivity needs the
+#   attribute to resolve to a resource id) — the dimen must exist as a
+#   REAL dimension resource at its original id and the style item must
+#   point at it by REFERENCE.
+#   The side-by-side build (1.4, Redroid probe 43616286704, RUNNING)
+#   already proved the fix: apktool decode + rebrand.py repairs
+#   (2i split dimens, 2j split drawables/strings, 2k split XML
+#   drawables) + aapt2 rebuild + LSPatch. Theme 1.2 runs THE SAME
+#   pipeline, but with rebrand.py --keep-package: package stays
+#   com.instagram.android (replaces the official app), no rename,
+#   no new label, no new icon — only the launch repairs run.
 #
-# Secrets (same as instaeclipse.yml):
-#   - TESTKEY_P12_B64 / TESTKEY_PASSWORD (testkey keystore, never in logs)
+# Pipeline (order matters):
+#   0. Strip requiredSplitTypes from the stock APK FIRST (before decode):
+#      the stock manifest declares requiredSplitTypes='base__density'
+#      and the density split is not inside the single APK — without the
+#      strip a clean device refuses the install with
+#      INSTALL_FAILED_MISSING_SPLIT (emulator run 43588589307).
+#   1. Build the RdxGram Theme module from source (rdxgram-theme/, same
+#      Gradle build as before): Kotlin + legacy Xposed API only, Inter
+#      variable font, floating translucent capsule bottom bar + selected
+#      tab pill, settings app with two switches (defaults ON).
+#   2. apktool 2.12.0 decodes the stripped stock base APK.
+#   3. rebrand.py --keep-package repairs the decoded tree only
+#      (layout indirection codes kept, Play-split dimens/drawables/
+#      strings/XML drawables restored at original ids). Package,
+#      authorities, labels and icons are untouched.
+#   4. apktool rebuilds the APK (unsigned).
+#   5. The rebuild is pre-signed with testkey (LSPatch 1.0 cannot patch
+#      an unsigned APK: "Could not read the original apk's signature"),
+#      then LSPatch 1.0 embeds the theme module + loader dex + sig
+#      bypass 2 and signs with testkey.
+#   6. Verify: package com.instagram.android, label "Instagram",
+#      MAIN/LAUNCHER present, module embedded (classes + Inter font
+#      SHA), no requiredSplitTypes, layout indirection codes resolve.
+#
+# Secrets (same as before): TESTKEY_P12_B64 / TESTKEY_PASSWORD.
 #
 # Output: Instagram-451.0.0.53.80-RdxGram-Theme-<version>-testkey.apk
 #   (package com.instagram.android, testkey-signed, RdxGram Theme module
 #   embedded under assets/lspatch/modules/ir.rdx.gram.theme.apk).
-# Since theme 1.1 the base APK's manifest has requiredSplitTypes stripped
-# BEFORE patching (see .github/scripts/strip_required_splits.py) so the
-# final APK installs standalone on a clean device — the Play-bundle
-# density split is not inside the single APK (INSTALL_FAILED_MISSING_SPLIT,
-# emulator run 43588589307). Stripping the base (not the patched APK)
-# matters: LSPatch preserves the manifest and signs the output itself,
-# so the final APK stays ~141 MB; stripping the patched APK instead
-# would force zipalign + re-sign, which expands LSPatch's nested-APK
-# layout from ~141 MB to ~277 MB.
-#   The font and the bar themselves are verified only by the phone test —
-#   this workflow verifies the module IS the theme module (classes +
-#   font asset + xposed entries present) and the APK is well-formed
-#   and signed.
-#
-# Also uploads the standalone module APK (rdxgram-theme-<version>.apk) so the
-# settings app can be installed for the on/off switches.
+# Also uploads the standalone module APK (rdxgram-theme-<version>.apk)
+# so the settings app can be installed for the on/off switches.
 
 name: Build Instagram + RdxGram Theme (LSPatch)
 
@@ -49,7 +69,7 @@ on:
       theme_version:
         description: "Theme release version (used in APK and release names)"
         required: true
-        default: "1.1"
+        default: "1.2"
 
 permissions:
   contents: read
@@ -57,7 +77,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -68,18 +88,30 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Locate Android build-tools 34
+      - name: Locate Android build-tools 35
+        # 35.0.0, NOT 34.0.0: apksigner 34 re-writes the APK with the
+        # zip entries in a content-sensitive order, so the
+        # resources.arsc offset in the pre-signed APK — and hence in
+        # the LSPatch output — swings by tens of MB between runs.
+        # apksigner 35 preserves the input zip layout, so the final
+        # arsc offset is a deterministic function of the content and
+        # the --check-arsc gate is stable (same reason as
+        # rdxgram-sidebyside.yml).
         run: |
           ls "$ANDROID_HOME/build-tools"
-          test -x "$ANDROID_HOME/build-tools/34.0.0/apksigner"
-          test -x "$ANDROID_HOME/build-tools/34.0.0/zipalign"
-          test -x "$ANDROID_HOME/build-tools/34.0.0/aapt"
-          echo "BT=$ANDROID_HOME/build-tools/34.0.0" >> "$GITHUB_ENV"
+          if [ ! -x "$ANDROID_HOME/build-tools/35.0.0/apksigner" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "build-tools 35.0.0 missing; installing via sdkmanager"
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;35.0.0" >/dev/null 2>&1 || echo "sdkmanager install failed (continuing to check)"
+          fi
+          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/aapt"
+          echo "BT=$ANDROID_HOME/build-tools/35.0.0" >> "$GITHUB_ENV"
 
       - name: Ensure Android platform 34 (best effort)
         run: |
           if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || echo "sdkmanager install skipped (platform may already be present)"
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;35.0.0" >/dev/null 2>&1 || echo "sdkmanager install skipped (platform may already be present)"
           else
             echo "no sdkmanager; relying on the preinstalled SDK"
           fi
@@ -116,11 +148,15 @@ jobs:
           unzip -p "$MODULE_APK" "META-INF/xposed/module.prop" | grep -q "minVersion=82" || (echo "MINVERSION_MISSING" && exit 1)
           echo "theme module verified: entry + FontHook + TabBarHook + settings present"
 
-      - name: Download LSPatch 1.0, verify size
+      - name: Download LSPatch 1.0 and apktool 2.12.0, verify sizes
         run: |
           curl -fL --retry 3 -o lspatch-v1.0-455-release.jar https://github.com/JingMatrix/LSPatch/releases/download/v1.0/lspatch-v1.0-455-release.jar
           test "$(stat -c%s lspatch-v1.0-455-release.jar)" = "12092952"
-          sha256sum lspatch-v1.0-455-release.jar
+          curl -fL --retry 3 -o apktool_2.12.0.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.12.0/apktool_2.12.0.jar
+          test "$(stat -c%s apktool_2.12.0.jar)" = "25925346"
+          test "$(sha256sum apktool_2.12.0.jar | cut -d' ' -f1)" = "effb69dab2f93806cafc0d232f6be32c2551b8d51c67650f575e46c016908fdd"
+          sha256sum lspatch-v1.0-455-release.jar apktool_2.12.0.jar
+          java -jar apktool_2.12.0.jar version
 
       - name: Download stock Instagram 451 base APK (from this repo's release)
         env:
@@ -132,26 +168,7 @@ jobs:
           sha256sum ig/instagram-451.0.0.53.80.apk
           test "$(sha256sum ig/instagram-451.0.0.53.80.apk | cut -d' ' -f1)" = "9eff1efa4591d53f8d97631c67a381a26a01929e093f604b37aa69fdf443d628"
           echo "stock Instagram 451.0.0.53.80 base APK, SHA-256 verified" | tee download.log
-
-      - name: Strip requiredSplitTypes from base APK (standalone install)
-        run: |
-          # Stock Instagram 451 is a Play-bundle build: its manifest
-          # declares requiredSplitTypes='base__density', and the density
-          # config split is not inside the single base APK — so the APK
-          # refuses to install on a clean device (INSTALL_FAILED_MISSING_SPLIT,
-          # seen in emulator run 43588589307). Remove that one attribute
-          # from the base manifest BEFORE patching: LSPatch preserves the
-          # manifest and signs the output itself, so the final APK stays
-          # ~141 MB. (Stripping the patched APK instead would force
-          # zipalign + re-sign, which expands LSPatch's nested-APK layout
-          # from ~141 MB to ~277 MB.)
-          # NOTE: this runs AFTER the download step's SHA-256 check, so the
-          # stock file is still verified byte-identical before we touch it.
-          python3 .github/scripts/strip_required_splits.py ig/instagram-451.0.0.53.80.apk ig/instagram-stripped.apk
-          test -s ig/instagram-stripped.apk
-          mv ig/instagram-stripped.apk ig/instagram-451.0.0.53.80.apk
-          python3 .github/scripts/strip_required_splits.py --check ig/instagram-451.0.0.53.80.apk
-          ls -la ig/
+          cp ig/instagram-451.0.0.53.80.apk instagram-play.apk
 
       - name: Inspect downloaded APKs
         run: |
@@ -178,8 +195,6 @@ jobs:
             echo "BASE_HAS_NO_NATIVE_LIBS: base APK has no arm64 .so files; splits carry them."
           fi
           "$BT/aapt" dump badging "$BASE_APK" | grep -q "package: name='com.instagram.android'"
-          cp "$BASE_APK" instagram-play.apk
-          sha256sum instagram-play.apk
 
       - name: Stop when base APK has no native libs
         if: env.HAS_LIBS != 'true'
@@ -187,7 +202,85 @@ jobs:
           echo "BASE_HAS_NO_NATIVE_LIBS"
           exit 1
 
-      - name: Patch with LSPatch (embed theme module, inject loader dex, sig bypass 2)
+      - name: Strip requiredSplitTypes from base APK (before decode)
+        if: env.HAS_LIBS == 'true'
+        run: |
+          # Stock Instagram 451 is a Play-bundle build: its manifest
+          # declares requiredSplitTypes='base__density', and the density
+          # config split is not inside the single base APK — so the APK
+          # refuses to install on a clean device (INSTALL_FAILED_MISSING_SPLIT,
+          # seen in emulator run 43588589307). Remove that one attribute
+          # from the base manifest BEFORE patching/decoding: the decoded
+          # manifest then has no such attribute, so the rebuilt APK
+          # installs standalone too.
+          python3 .github/scripts/strip_required_splits.py ig/instagram-451.0.0.53.80.apk ig/instagram-stripped.apk
+          test -s ig/instagram-stripped.apk
+          mv ig/instagram-stripped.apk ig/instagram-451.0.0.53.80.apk
+          python3 .github/scripts/strip_required_splits.py --check ig/instagram-451.0.0.53.80.apk
+          cp ig/instagram-451.0.0.53.80.apk instagram-play.apk
+          ls -la ig/
+
+      - name: Decode base APK with apktool
+        if: env.HAS_LIBS == 'true'
+        run: |
+          df -h .
+          free -m
+          java -jar apktool_2.12.0.jar d -o ig-decoded -f instagram-play.apk 2>&1 | tee apktool-decode.log
+          echo "--- decoded tree ---"
+          du -sh ig-decoded
+          ls ig-decoded/
+          test -f ig-decoded/AndroidManifest.xml
+          grep -o 'package="[^"]*"' ig-decoded/AndroidManifest.xml | head -1
+          grep -q 'package="com.instagram.android"' ig-decoded/AndroidManifest.xml || (echo "DECODED_PACKAGE_WRONG" && exit 1)
+
+      - name: Repair decoded tree (Play-split holes; package kept)
+        if: env.HAS_LIBS == 'true'
+        run: |
+          python3 rdxgram-rebrand/rebrand.py ig-decoded rdxgram-rebrand/icons rdxgram-rebrand/split-drawables rdxgram-rebrand/split-drawables-2k --keep-package 2>&1 | tee rebrand.log
+          echo "--- keep-package gates ---"
+          grep -q 'package kept: com.instagram.android' rebrand.log || (echo "PACKAGE_NOT_KEPT" && exit 1)
+          grep -q 'package="com.instagram.android"' ig-decoded/AndroidManifest.xml || (echo "MANIFEST_PACKAGE_CHANGED" && exit 1)
+          # No rename must have happened anywhere in the decoded manifest.
+          grep -q "Rdx gram" ig-decoded/AndroidManifest.xml && (echo "RENAME_LEAKED_INTO_MANIFEST" && exit 1) || echo "no rename in manifest"
+          grep -q "com.rdx.gram" ig-decoded/AndroidManifest.xml && (echo "RENAME_LEAKED_INTO_MANIFEST" && exit 1) || echo "no rdx package in manifest"
+          echo "split repairs (Play density-split dimensions) in styles.xml:"
+          grep -q '<item name="tabBarHeight">@dimen/tab_bar_height_panorama</item>' ig-decoded/res/values/styles.xml || (echo "SPLIT_REPAIR_TABBARHEIGHT_MISSING" && exit 1)
+          grep -q '<item name="strokeWidth">@dimen/circular_avatar_stroke_width</item>' ig-decoded/res/values/styles.xml || (echo "SPLIT_REPAIR_STROKEWIDTH_MISSING" && exit 1)
+          test "$(grep -c '<item name="mediaViewOuterVerticalMargin">@dimen/direct_in_thread_composer_top_margin</item>' ig-decoded/res/values/styles.xml)" = "2" || (echo "SPLIT_REPAIR_MARGIN_COUNT_WRONG" && exit 1)
+          grep -q '<dimen name="tab_bar_height_panorama">48dp</dimen>' ig-decoded/res/values/rdx_split_dimens.xml || (echo "SPLIT_DIMEN_TABBARHEIGHT_MISSING" && exit 1)
+          grep -q '<dimen name="circular_avatar_stroke_width">2px</dimen>' ig-decoded/res/values/rdx_split_dimens.xml || (echo "SPLIT_DIMEN_STROKEWIDTH_MISSING" && exit 1)
+          grep -q '<dimen name="direct_in_thread_composer_top_margin">6dp</dimen>' ig-decoded/res/values/rdx_split_dimens.xml || (echo "SPLIT_DIMEN_MARGIN_MISSING" && exit 1)
+          echo "split repairs present: tabBarHeight -> tab_bar_height_panorama 48dp, strokeWidth -> circular_avatar_stroke_width 2px, mediaViewOuterVerticalMargin -> direct_in_thread_composer_top_margin 6dp x2"
+          echo "split sweep 2k (Play-split XML drawables) in rebrand.log:"
+          grep -q '2k total: 119 drawables, 2 xml stubs, 2 dimens, 131 xml files fixed' rebrand.log || (echo "SPLIT_2K_TOTAL_WRONG" && exit 1)
+          grep -q '2k restore drawable input -> 0x7f082185' rebrand.log || (echo "SPLIT_2K_INPUT_MISSING" && exit 1)
+          grep -q '2k restore drawable input_highlighted -> 0x7f082188' rebrand.log || (echo "SPLIT_2K_INPUT_HIGHLIGHTED_MISSING" && exit 1)
+          grep -q '2k xml fix res/drawable/input_background.xml: 2 replacements (0 left @null)' rebrand.log || (echo "SPLIT_2K_INPUT_BACKGROUND_XML_MISSING" && exit 1)
+          echo "split sweep 2k present: login-modal input_background selector + 9-patches restored"
+
+      - name: Rebuild APK with apktool
+        if: env.HAS_LIBS == 'true'
+        run: |
+          df -h .
+          java -jar apktool_2.12.0.jar b ig-decoded -o ig-theme.apk 2>&1 | tee apktool-build.log
+          ls -la ig-theme.apk
+          sha256sum ig-theme.apk
+          "$BT/aapt" dump badging ig-theme.apk | head -3
+          "$BT/aapt" dump badging ig-theme.apk | grep -q "package: name='com.instagram.android'"
+          "$BT/aapt" dump badging ig-theme.apk | grep -q "application-label:'Instagram'" || (echo "APP_LABEL_NOT_INSTAGRAM" && exit 1)
+          echo "--- MAIN/LAUNCHER intent filter in rebuilt manifest ---"
+          "$BT/aapt" dump xmltree ig-theme.apk AndroidManifest.xml > /tmp/manifest-tree.txt
+          grep -q "android.intent.action.MAIN" /tmp/manifest-tree.txt || (echo "NO_MAIN_INTENT_FILTER" && exit 1)
+          grep -q "android.intent.category.LAUNCHER" /tmp/manifest-tree.txt || (echo "NO_LAUNCHER_CATEGORY" && exit 1)
+          grep -q "com.instagram.android.activity.MainTabActivity" /tmp/manifest-tree.txt || (echo "MAINTAB_ALIAS_MISSING" && exit 1)
+          echo "rebuilt APK verified: package com.instagram.android, label 'Instagram', MAIN/LAUNCHER filter present"
+
+      - name: Verify layout indirection survived the rebuild
+        if: env.HAS_LIBS == 'true'
+        run: |
+          python3 .github/scripts/verify_layout_values.py ig-theme.apk
+
+      - name: Patch rebuilt APK with LSPatch (embed theme module, inject loader dex, sig bypass 2)
         if: env.HAS_LIBS == 'true'
         env:
           TESTKEY_P12_B64: ${{ secrets.TESTKEY_P12_B64 }}
@@ -196,13 +289,18 @@ jobs:
           test -n "$TESTKEY_P12_B64"
           test -n "$TESTKEY_PASSWORD"
           echo "$TESTKEY_P12_B64" | base64 -d > testkey.p12
+          echo "--- pre-sign the apktool rebuild (LSPatch cannot patch an unsigned APK: it logs 'Could not read the original apk's signature' and outputs only origin.apk) ---"
+          "$BT/apksigner" sign --ks testkey.p12 --ks-type PKCS12 --ks-pass "pass:$TESTKEY_PASSWORD" --ks-key-alias testkey --key-pass "pass:$TESTKEY_PASSWORD" ig-theme.apk
+          "$BT/apksigner" verify --verbose ig-theme.apk || (echo "PRESIGN_VERIFY_FAILED" && exit 1)
           java -jar lspatch-v1.0-455-release.jar \
             -m "$MODULE_APK" \
             --injectdex \
             -l 2 \
             -k testkey.p12 "$TESTKEY_PASSWORD" testkey "$TESTKEY_PASSWORD" \
-            -o out -f -v instagram-play.apk 2>&1 | tee lspatch.log
+            -o out -f -v ig-theme.apk 2>&1 | tee lspatch.log
           rm -f testkey.p12
+          if grep -q "Could not read the original apk's signature" lspatch.log; then echo "LSPATCH_SIGNATURE_READ_FAILED"; exit 1; fi
+          echo "LSPatch read the original signature OK"
           ls -la out/
 
       - name: Verify patched APK
@@ -214,8 +312,14 @@ jobs:
           cp "$PATCHED" "$PATCHED_APK"
           echo "PATCHED_APK=$PATCHED_APK" >> "$GITHUB_ENV"
           ls -la "$PATCHED_APK"
-          "$BT/aapt" dump badging "$PATCHED_APK" | head -3
-          "$BT/aapt" dump badging "$PATCHED_APK" | grep -q "package: name='com.instagram.android'"
+          echo "--- patched APK zip listing (diagnostic: aapt cannot read this file) ---"
+          unzip -l "$PATCHED_APK" | head -25
+          echo "--- manifest check (Python AXML parser: aapt dump badging fails on LSPatch+apktool APKs even though the zip and manifest are valid) ---"
+          python3 .github/scripts/verify_apk_manifest.py --expect-package com.instagram.android "$PATCHED_APK"
+          echo "--- no requiredSplitTypes + arsc stored and 4-byte aligned ---"
+          python3 .github/scripts/strip_required_splits.py --check "$PATCHED_APK"
+          python3 .github/scripts/strip_required_splits.py --check-arsc "$PATCHED_APK"
+          python3 .github/scripts/verify_layout_values.py "$PATCHED_APK"
           "$BT/apksigner" verify --verbose --print-certs "$PATCHED_APK"
           echo "--- embedded module ---"
           unzip -l "$PATCHED_APK" | grep -i "lspatch/modules" || (echo "MODULE_NOT_EMBEDDED" && exit 1)
@@ -230,22 +334,9 @@ jobs:
           unzip -p "$EMBEDDED" "assets/fonts/Inter-Variable.ttf" > /tmp/inter-embedded.ttf
           test "$(sha256sum /tmp/inter-embedded.ttf | cut -d' ' -f1)" = "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031" || (echo "EMBEDDED_FONT_SHA_MISMATCH" && exit 1)
           echo "embedded module verified: theme module + Inter font inside the final APK"
-          echo "--- zipalign (report only; LSPatch output is shipped as-is, like 1.0) ---"
+          echo "--- zipalign (report only; LSPatch output is shipped as-is, like 1.0/1.1) ---"
           "$BT/zipalign" -c -v 4 "$PATCHED_APK" || echo "ZIPALIGN_NOT_ALIGNED (install still works)"
-          echo "--- SHA-256 (pre-strip) ---"
-          sha256sum "$PATCHED_APK"
-
-      - name: Confirm no requiredSplitTypes in final APK
-        if: env.HAS_LIBS == 'true'
-        run: |
-          # LSPatch must have preserved the stripped base manifest; if the
-          # attribute came back, fail loudly instead of shipping an APK
-          # that cannot install on a clean device. Also verify
-          # resources.arsc is still stored and 4-byte aligned — R+
-          # refuses the install with error -124 otherwise.
-          python3 .github/scripts/strip_required_splits.py --check "$PATCHED_APK"
-          python3 .github/scripts/strip_required_splits.py --check-arsc "$PATCHED_APK"
-          ls -la "$PATCHED_APK"
+          echo "--- SHA-256 ---"
           sha256sum "$PATCHED_APK"
 
       - name: Upload APKs
@@ -258,5 +349,8 @@ jobs:
             rdxgram-theme-${{ inputs.theme_version }}.apk
             lspatch.log
             download.log
+            rebrand.log
+            apktool-decode.log
+            apktool-build.log
           if-no-files-found: error
           retention-days: 30

@@ -2,7 +2,12 @@
 """Rebrand a decoded Instagram APK (apktool output) for a side-by-side install.
 
 Usage: rebrand.py <decoded-dir> <icons-dir> [split-drawables-dir]
-       [split-drawables-2k-dir]
+       [split-drawables-2k-dir] [--keep-package]
+
+       --keep-package: theme build — keep package com.instagram.android
+       and skip the rename-only steps (A, 3, 4, 5); the launch repairs
+       (2d/2e/2f/2h/2i/2j/2k) still run. The icons dir is then unused
+       (pass any existing dir).
 
 What it does (only these, nothing else):
 
@@ -307,6 +312,15 @@ def _insert_public_entry(lines, rtype, name, rid):
 def main():
     decoded, icons_dir = sys.argv[1], sys.argv[2]
     split_dir = sys.argv[3] if len(sys.argv) > 3 else None
+    # 5th argument "--keep-package": theme build — keep the stock
+    # package com.instagram.android (replaces the official app) and
+    # skip every rename-only step (A: package/authorities/permissions/
+    # labels, step 3: label string, steps 4/5: icons). The launch
+    # repairs (2d/2e/2f/2h layout indirection, 2i split dimens, 2j
+    # split drawables/strings, 2k split XML drawables) still run:
+    # without them even the stock APK crashes at launch (see header
+    # D2/D3/D4), and the theme build used to skip them.
+    keep_package = len(sys.argv) > 5 and sys.argv[5] == "--keep-package"
     manifest_path = os.path.join(decoded, "AndroidManifest.xml")
     if not os.path.isfile(manifest_path):
         print("MANIFEST_MISSING: " + manifest_path)
@@ -316,130 +330,141 @@ def main():
 
     changes = []
 
-    # 1. package attribute
-    if 'package="' + OLD_PKG + '"' not in manifest:
-        print("PACKAGE_ATTR_NOT_FOUND")
-        return 1
-    manifest = manifest.replace('package="' + OLD_PKG + '"', 'package="' + NEW_PKG + '"', 1)
-    changes.append("manifest package -> " + NEW_PKG)
+    if not keep_package:
+        # 1. package attribute
+        if 'package="' + OLD_PKG + '"' not in manifest:
+            print("PACKAGE_ATTR_NOT_FOUND")
+            return 1
+        manifest = manifest.replace('package="' + OLD_PKG + '"', 'package="' + NEW_PKG + '"', 1)
+        changes.append("manifest package -> " + NEW_PKG)
 
-    # 2a. provider authorities
-    def fix_authorities(m):
-        value = m.group(1)
-        new = None
-        if value.startswith(OLD_PKG):
-            new = NEW_PKG + value[len(OLD_PKG):]
-        elif value.startswith("com.instagram."):
-            new = NEW_PKG + value[len("com.instagram"):]
-        elif value.startswith("com.facebook."):
-            new = NEW_PKG + value[len("com.facebook"):]
-        if new is not None and new != value:
-            changes.append("authority: " + value + " -> " + new)
-            return 'android:authorities="' + new + '"'
-        return m.group(0)
+        # 2a. provider authorities
+        def fix_authorities(m):
+            value = m.group(1)
+            new = None
+            if value.startswith(OLD_PKG):
+                new = NEW_PKG + value[len(OLD_PKG):]
+            elif value.startswith("com.instagram."):
+                new = NEW_PKG + value[len("com.instagram"):]
+            elif value.startswith("com.facebook."):
+                new = NEW_PKG + value[len("com.facebook"):]
+            if new is not None and new != value:
+                changes.append("authority: " + value + " -> " + new)
+                return 'android:authorities="' + new + '"'
+            return m.group(0)
 
-    manifest = re.sub(r'android:authorities="([^"]*)"', fix_authorities, manifest)
+        manifest = re.sub(r'android:authorities="([^"]*)"', fix_authorities, manifest)
 
-    # 2b. permission names: <permission>, <permission-group> and
-    # <uses-permission> android:name="com.instagram.android...">.
-    # Line-scoped so class names in android:name are only touched when
-    # the element is a permission declaration/use.
-    out_lines = []
-    for line in manifest.splitlines(keepends=True):
-        stripped = line.lstrip()
-        if (
-            stripped.startswith("<permission ")
-            or stripped.startswith("<permission-group ")
-            or stripped.startswith("<uses-permission ")
-        ):
+        # 2b. permission names: <permission>, <permission-group> and
+        # <uses-permission> android:name="com.instagram.android...">.
+        # Line-scoped so class names in android:name are only touched when
+        # the element is a permission declaration/use.
+        out_lines = []
+        for line in manifest.splitlines(keepends=True):
+            stripped = line.lstrip()
+            if (
+                stripped.startswith("<permission ")
+                or stripped.startswith("<permission-group ")
+                or stripped.startswith("<uses-permission ")
+            ):
+                new_line = re.sub(
+                    r'android:name="com\.instagram\.android([^"]*)"',
+                    lambda m: 'android:name="' + NEW_PKG + m.group(1) + '"',
+                    line,
+                )
+                if new_line != line:
+                    changes.append("permission line: " + line.strip()[:160])
+                line = new_line
+            # android:permission="com.instagram.android..." uses on components
             new_line = re.sub(
-                r'android:name="com\.instagram\.android([^"]*)"',
-                lambda m: 'android:name="' + NEW_PKG + m.group(1) + '"',
+                r'android:permission="com\.instagram\.android([^"]*)"',
+                lambda m: 'android:permission="' + NEW_PKG + m.group(1) + '"',
                 line,
             )
             if new_line != line:
-                changes.append("permission line: " + line.strip()[:160])
-            line = new_line
-        # android:permission="com.instagram.android..." uses on components
-        new_line = re.sub(
-            r'android:permission="com\.instagram\.android([^"]*)"',
-            lambda m: 'android:permission="' + NEW_PKG + m.group(1) + '"',
-            line,
-        )
-        if new_line != line:
-            changes.append("permission use: " + line.strip()[:160])
-        out_lines.append(new_line)
-    manifest = "".join(out_lines)
+                changes.append("permission use: " + line.strip()[:160])
+            out_lines.append(new_line)
+        manifest = "".join(out_lines)
 
-    # 2c. a meta-data value exactly equal to the old package (a package
-    # reference, not a class name).
-    manifest = re.sub(
-        r'android:value="com\.instagram\.android"',
-        'android:value="' + NEW_PKG + '"',
-        manifest,
-    )
-
-    # 2g. Launcher label, literal "Rdx gram" (runs before the manifest
-    # is written — it edits the manifest text). IG 451 has NO app_name
-    # string: android:label is a shrunk string id everywhere
-    # (application, LauncherActivity, InstagramMainActivity, and the
-    # MainTabActivity / InternalLauncher / themed-icon aliases):
-    # public.xml says <public type="string" name="(name removed)"
-    # id="0x7f130009"> and the strings.xml value is "Instagram".
-    # Replace every such reference with the literal label. The
-    # application tag is forced to carry a literal label too (inserted
-    # if the tag has none at all). The string's value is rewritten in
-    # step 3 as a belt-and-suspenders fallback.
-    label_id = "0x7f130009"
-    label_name = None
-    label_public_path = os.path.join(decoded, "res", "values", "public.xml")
-    if os.path.isfile(label_public_path):
-        with open(label_public_path, "r", encoding="utf-8") as fh:
-            _pub = fh.read()
-        _m = re.search(
-            r'<public[^>]+type="string"[^>]+name="([^"]+)"[^>]+id="0x7f130009"',
-            _pub,
-        ) or re.search(
-            r'<public[^>]+id="0x7f130009"[^>]+name="([^"]+)"', _pub
-        )
-        if _m:
-            label_name = _m.group(1)
-    _refs = []
-    if label_name:
-        _refs.append("@string/" + label_name)
-    _refs.append("@" + label_id)
-    _label_n = 0
-    for _ref in _refs:
-        manifest, _n = re.subn(
-            r'android:label="' + re.escape(_ref) + '"',
-            'android:label="' + APP_NAME + '"',
+        # 2c. a meta-data value exactly equal to the old package (a package
+        # reference, not a class name).
+        manifest = re.sub(
+            r'android:value="com\.instagram\.android"',
+            'android:value="' + NEW_PKG + '"',
             manifest,
         )
-        _label_n += _n
-    _app = re.search(r"<application\b[^>]*>", manifest)
-    if _app:
-        _tag = _app.group(0)
-        if "android:label=" in _tag:
-            _newtag = re.sub(
-                r'android:label="[^"]*"',
-                'android:label="' + APP_NAME + '"',
-                _tag,
-            )
-        else:
-            _newtag = _tag[:-1] + ' android:label="' + APP_NAME + '">'
-        if _newtag != _tag:
-            manifest = manifest[: _app.start()] + _newtag + manifest[_app.end():]
-            _label_n += 1
-    changes.append(
-        "label literal 'Rdx gram': %d manifest label(s) replaced "
-        "(refs %r, string name %r)"
-        % (_label_n, _refs, label_name)
-    )
-    # Keep the label name for step 3 (strings.xml value patch).
-    _label_name_for_strings = label_name
 
-    with open(manifest_path, "w", encoding="utf-8") as fh:
-        fh.write(manifest)
+        # 2g. Launcher label, literal "Rdx gram" (runs before the manifest
+        # is written — it edits the manifest text). IG 451 has NO app_name
+        # string: android:label is a shrunk string id everywhere
+        # (application, LauncherActivity, InstagramMainActivity, and the
+        # MainTabActivity / InternalLauncher / themed-icon aliases):
+        # public.xml says <public type="string" name="(name removed)"
+        # id="0x7f130009"> and the strings.xml value is "Instagram".
+        # Replace every such reference with the literal label. The
+        # application tag is forced to carry a literal label too (inserted
+        # if the tag has none at all). The string's value is rewritten in
+        # step 3 as a belt-and-suspenders fallback.
+        label_id = "0x7f130009"
+        label_name = None
+        label_public_path = os.path.join(decoded, "res", "values", "public.xml")
+        if os.path.isfile(label_public_path):
+            with open(label_public_path, "r", encoding="utf-8") as fh:
+                _pub = fh.read()
+            _m = re.search(
+                r'<public[^>]+type="string"[^>]+name="([^"]+)"[^>]+id="0x7f130009"',
+                _pub,
+            ) or re.search(
+                r'<public[^>]+id="0x7f130009"[^>]+name="([^"]+)"', _pub
+            )
+            if _m:
+                label_name = _m.group(1)
+        _refs = []
+        if label_name:
+            _refs.append("@string/" + label_name)
+        _refs.append("@" + label_id)
+        _label_n = 0
+        for _ref in _refs:
+            manifest, _n = re.subn(
+                r'android:label="' + re.escape(_ref) + '"',
+                'android:label="' + APP_NAME + '"',
+                manifest,
+            )
+            _label_n += _n
+        _app = re.search(r"<application\b[^>]*>", manifest)
+        if _app:
+            _tag = _app.group(0)
+            if "android:label=" in _tag:
+                _newtag = re.sub(
+                    r'android:label="[^"]*"',
+                    'android:label="' + APP_NAME + '"',
+                    _tag,
+                )
+            else:
+                _newtag = _tag[:-1] + ' android:label="' + APP_NAME + '">'
+            if _newtag != _tag:
+                manifest = manifest[: _app.start()] + _newtag + manifest[_app.end():]
+                _label_n += 1
+        changes.append(
+            "label literal 'Rdx gram': %d manifest label(s) replaced "
+            "(refs %r, string name %r)"
+            % (_label_n, _refs, label_name)
+        )
+        # Keep the label name for step 3 (strings.xml value patch).
+        _label_name_for_strings = label_name
+
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            fh.write(manifest)
+    else:
+        # Keep-package mode (theme build): the stock package is kept
+        # (com.instagram.android, replaces the official app), so the
+        # manifest is left byte-identical and there is no label string
+        # to rewrite in step 3.
+        if 'package="' + OLD_PKG + '"' not in manifest:
+            print("PACKAGE_ATTR_NOT_FOUND")
+            return 1
+        _label_name_for_strings = None
+        changes.append("package kept: " + OLD_PKG)
 
     # 2d. Keep the layout indirection codes (see header, section B):
     # apktool decodes every "L|..." layout value into
@@ -1120,130 +1145,132 @@ def main():
         changes.append("2k total: %d drawables, %d xml stubs, %d dimens, "
                        "%d xml files fixed" % (n_draw, n_stub, n_dim, n_xml))
 
-    # 3. Label string value in every values*/strings.xml
-    # (belt-and-suspenders for the literal manifest labels of 2g):
-    # rewrite the shrunk label string's value to "Rdx gram" so any
-    # label reference the manifest pass missed still reads the new
-    # name. Also rewrite app_name if it ever exists (it does not on
-    # IG 451 — the missing app_name is expected, not a failure).
-    res_dir = os.path.join(decoded, "res")
-    label_value_files = []
-    label_value_n = 0
-    if _label_name_for_strings:
-        label_value_re = re.compile(
-            r'(<string name="' + re.escape(_label_name_for_strings) + r'"[^>]*>)(.*?)(</string>)',
-            re.DOTALL,
-        )
+    if not keep_package:
+        # 3. Label string value in every values*/strings.xml
+        # (belt-and-suspenders for the literal manifest labels of 2g):
+        # rewrite the shrunk label string's value to "Rdx gram" so any
+        # label reference the manifest pass missed still reads the new
+        # name. Also rewrite app_name if it ever exists (it does not on
+        # IG 451 — the missing app_name is expected, not a failure).
+        res_dir = os.path.join(decoded, "res")
+        label_value_files = []
+        label_value_n = 0
+        if _label_name_for_strings:
+            label_value_re = re.compile(
+                r'(<string name="' + re.escape(_label_name_for_strings) + r'"[^>]*>)(.*?)(</string>)',
+                re.DOTALL,
+            )
+            for root, _dirs, files in os.walk(res_dir):
+                if os.path.basename(root).startswith("values") and "strings.xml" in files:
+                    path = os.path.join(root, "strings.xml")
+                    with open(path, "r", encoding="utf-8") as fh:
+                        text = fh.read()
+                    new_text, n = label_value_re.subn(
+                        lambda m: m.group(1) + APP_NAME + m.group(3), text
+                    )
+                    if n:
+                        label_value_n += n
+                        label_value_files.append(os.path.relpath(path, decoded) + " x%d" % n)
+                        with open(path, "w", encoding="utf-8") as fh:
+                            fh.write(new_text)
+        if label_value_n:
+            changes.append(
+                "label string value -> %s (%d) in: %s"
+                % (APP_NAME, label_value_n, ", ".join(label_value_files))
+            )
+        else:
+            print(
+                "LABEL_STRING_NOT_PATCHED: no <string name=%r> in res/values*/strings.xml"
+                % (_label_name_for_strings,)
+            )
+        app_name_files = []
+        app_name_found = False
+        strings_re = re.compile(r'(<string name="app_name"[^>]*>)(.*?)(</string>)', re.DOTALL)
         for root, _dirs, files in os.walk(res_dir):
             if os.path.basename(root).startswith("values") and "strings.xml" in files:
                 path = os.path.join(root, "strings.xml")
                 with open(path, "r", encoding="utf-8") as fh:
                     text = fh.read()
-                new_text, n = label_value_re.subn(
-                    lambda m: m.group(1) + APP_NAME + m.group(3), text
-                )
+                new_text, n = strings_re.subn(lambda m: m.group(1) + APP_NAME + m.group(3), text)
                 if n:
-                    label_value_n += n
-                    label_value_files.append(os.path.relpath(path, decoded) + " x%d" % n)
+                    app_name_found = True
+                    app_name_files.append(os.path.relpath(path, decoded) + " x%d" % n)
                     with open(path, "w", encoding="utf-8") as fh:
                         fh.write(new_text)
-    if label_value_n:
-        changes.append(
-            "label string value -> %s (%d) in: %s"
-            % (APP_NAME, label_value_n, ", ".join(label_value_files))
-        )
-    else:
-        print(
-            "LABEL_STRING_NOT_PATCHED: no <string name=%r> in res/values*/strings.xml"
-            % (_label_name_for_strings,)
-        )
-    app_name_files = []
-    app_name_found = False
-    strings_re = re.compile(r'(<string name="app_name"[^>]*>)(.*?)(</string>)', re.DOTALL)
-    for root, _dirs, files in os.walk(res_dir):
-        if os.path.basename(root).startswith("values") and "strings.xml" in files:
-            path = os.path.join(root, "strings.xml")
-            with open(path, "r", encoding="utf-8") as fh:
-                text = fh.read()
-            new_text, n = strings_re.subn(lambda m: m.group(1) + APP_NAME + m.group(3), text)
-            if n:
-                app_name_found = True
-                app_name_files.append(os.path.relpath(path, decoded) + " x%d" % n)
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(new_text)
-    if app_name_found:
-        changes.append("app_name -> %s in: %s" % (APP_NAME, ", ".join(app_name_files)))
-    else:
-        print("APP_NAME_ABSENT (expected on IG 451): no <string name=\"app_name\"> — literal manifest labels (2g) cover the name")
+        if app_name_found:
+            changes.append("app_name -> %s in: %s" % (APP_NAME, ", ".join(app_name_files)))
+        else:
+            print("APP_NAME_ABSENT (expected on IG 451): no <string name=\"app_name\"> — literal manifest labels (2g) cover the name")
 
-    # 4. launcher icons. IG 451 has NO ic_launcher.png at all — the
-    # app icon is @mipmap/icon (a PNG per density + an adaptive-icon
-    # XML in the anydpi config whose background/foreground are
-    # ig_launcher_background / ig_launcher_foreground and whose
-    # monochrome layer is IG's own glyph). Replace all three PNG names
-    # per density from the pre-baked <icons-dir> files, plus
-    # internal_icon (icon of the disabled InternalLauncher alias) in
-    # its stock per-density format. Keep the legacy ic_launcher*.png
-    # copy too (no-op on IG 451).
-    replaced = []
-    for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"):
-        target_dir = os.path.join(res_dir, "mipmap-" + density)
-        for src_name, dst_name in (
-            ("ic_launcher.png", "icon.png"),
-            ("ig_launcher_background.png", "ig_launcher_background.png"),
-            ("ig_launcher_foreground.png", "ig_launcher_foreground.png"),
-        ):
-            src = os.path.join(icons_dir, "mipmap-" + density, src_name)
-            if not os.path.isfile(src):
-                continue
-            dst = os.path.join(target_dir, dst_name)
-            if os.path.isfile(dst):
+    if not keep_package:
+        # 4. launcher icons. IG 451 has NO ic_launcher.png at all — the
+        # app icon is @mipmap/icon (a PNG per density + an adaptive-icon
+        # XML in the anydpi config whose background/foreground are
+        # ig_launcher_background / ig_launcher_foreground and whose
+        # monochrome layer is IG's own glyph). Replace all three PNG names
+        # per density from the pre-baked <icons-dir> files, plus
+        # internal_icon (icon of the disabled InternalLauncher alias) in
+        # its stock per-density format. Keep the legacy ic_launcher*.png
+        # copy too (no-op on IG 451).
+        replaced = []
+        for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"):
+            target_dir = os.path.join(res_dir, "mipmap-" + density)
+            for src_name, dst_name in (
+                ("ic_launcher.png", "icon.png"),
+                ("ig_launcher_background.png", "ig_launcher_background.png"),
+                ("ig_launcher_foreground.png", "ig_launcher_foreground.png"),
+            ):
+                src = os.path.join(icons_dir, "mipmap-" + density, src_name)
+                if not os.path.isfile(src):
+                    continue
+                dst = os.path.join(target_dir, dst_name)
+                if os.path.isfile(dst):
+                    shutil.copyfile(src, dst)
+                    replaced.append("mipmap-" + density + "/" + dst_name)
+            # internal_icon keeps its stock per-density format
+            int_name = "internal_icon.webp" if density in ("mdpi", "hdpi", "xhdpi") else "internal_icon.png"
+            src = os.path.join(icons_dir, "mipmap-" + density, int_name)
+            dst = os.path.join(target_dir, int_name)
+            if os.path.isfile(src) and os.path.isfile(dst):
                 shutil.copyfile(src, dst)
-                replaced.append("mipmap-" + density + "/" + dst_name)
-        # internal_icon keeps its stock per-density format
-        int_name = "internal_icon.webp" if density in ("mdpi", "hdpi", "xhdpi") else "internal_icon.png"
-        src = os.path.join(icons_dir, "mipmap-" + density, int_name)
-        dst = os.path.join(target_dir, int_name)
-        if os.path.isfile(src) and os.path.isfile(dst):
-            shutil.copyfile(src, dst)
-            replaced.append("mipmap-" + density + "/" + int_name)
-    if replaced:
-        changes.append("icons replaced: " + ", ".join(replaced))
-    else:
-        print("APP_ICON_NOT_REPLACED: no res/mipmap-*/icon.png or layer PNGs found")
+                replaced.append("mipmap-" + density + "/" + int_name)
+        if replaced:
+            changes.append("icons replaced: " + ", ".join(replaced))
+        else:
+            print("APP_ICON_NOT_REPLACED: no res/mipmap-*/icon.png or layer PNGs found")
 
-    # 5. Adaptive icon XMLs (res/mipmap-*/icon.xml, the anydpi config):
-    # strip the <monochrome .../> element so a themed launcher falls
-    # back to the normal icon instead of IG's glyph; leave the
-    # background/foreground references alone (their PNGs were replaced
-    # in step 4). Legacy removal of ic_launcher.xml /
-    # ic_launcher_round.xml in mipmap-anydpi-v26 is kept.
-    mono_removed = []
-    for root, _dirs, files in os.walk(res_dir):
-        if os.path.basename(root).startswith("mipmap") and "icon.xml" in files:
-            path = os.path.join(root, "icon.xml")
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                txt = fh.read()
-            if "adaptive-icon" not in txt:
-                continue
-            new_txt, n = re.subn(r"<monochrome\b[^>]*/>", "", txt)
-            if n:
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(new_txt)
-                mono_removed.append(os.path.relpath(path, decoded))
-    if mono_removed:
-        changes.append("adaptive icons: monochrome removed from: " + ", ".join(mono_removed))
-    else:
-        print("MONOCHROME_NOT_FOUND: no <monochrome> in res/mipmap-*/icon.xml (already clean?)")
-    anydpi = os.path.join(res_dir, "mipmap-anydpi-v26")
-    removed = []
-    for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
-        path = os.path.join(anydpi, name)
-        if os.path.isfile(path):
-            os.remove(path)
-            removed.append("mipmap-anydpi-v26/" + name)
-    if removed:
-        changes.append("adaptive icons removed: " + ", ".join(removed))
+        # 5. Adaptive icon XMLs (res/mipmap-*/icon.xml, the anydpi config):
+        # strip the <monochrome .../> element so a themed launcher falls
+        # back to the normal icon instead of IG's glyph; leave the
+        # background/foreground references alone (their PNGs were replaced
+        # in step 4). Legacy removal of ic_launcher.xml /
+        # ic_launcher_round.xml in mipmap-anydpi-v26 is kept.
+        mono_removed = []
+        for root, _dirs, files in os.walk(res_dir):
+            if os.path.basename(root).startswith("mipmap") and "icon.xml" in files:
+                path = os.path.join(root, "icon.xml")
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    txt = fh.read()
+                if "adaptive-icon" not in txt:
+                    continue
+                new_txt, n = re.subn(r"<monochrome\b[^>]*/>", "", txt)
+                if n:
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(new_txt)
+                    mono_removed.append(os.path.relpath(path, decoded))
+        if mono_removed:
+            changes.append("adaptive icons: monochrome removed from: " + ", ".join(mono_removed))
+        else:
+            print("MONOCHROME_NOT_FOUND: no <monochrome> in res/mipmap-*/icon.xml (already clean?)")
+        anydpi = os.path.join(res_dir, "mipmap-anydpi-v26")
+        removed = []
+        for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
+            path = os.path.join(anydpi, name)
+            if os.path.isfile(path):
+                os.remove(path)
+                removed.append("mipmap-anydpi-v26/" + name)
+        if removed:
+            changes.append("adaptive icons removed: " + ", ".join(removed))
 
     print("REBRAND REPORT")
     for c in changes:
