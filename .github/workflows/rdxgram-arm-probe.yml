@@ -113,14 +113,16 @@ jobs:
           else
             echo "requiredSplitTypes present, stripping + re-signing with a throwaway key"
             sudo apt-get update -qq
-            sudo apt-get install -y apksigner zipalign
+            sudo apt-get install -y apksigner
             python3 .github/scripts/strip_required_splits.py "$APK" apk/stripped.apk
             python3 .github/scripts/strip_required_splits.py --check apk/stripped.apk
             python3 .github/scripts/strip_required_splits.py --check-arsc apk/stripped.apk
-            zipalign -f 4 apk/stripped.apk apk/aligned.apk
+            # No zipalign: it refuses LSPatch output ("header mismatch" —
+            # the overlapped origin.apk entry). apksigner tolerates it, and
+            # the strip script already guarantees resources.arsc alignment.
             openssl req -x509 -newkey rsa:2048 -keyout probe-key.pem -out probe-cert.pem -days 3650 -nodes -subj "/CN=RedroidProbe" 2>/dev/null
             openssl pkcs12 -export -out probe.p12 -inkey probe-key.pem -in probe-cert.pem -passout pass:android
-            apksigner sign --ks probe.p12 --ks-type PKCS12 --ks-pass pass:android --ks-key-alias 1 --key-pass pass:android --out apk/signed.apk apk/aligned.apk
+            apksigner sign --ks probe.p12 --ks-type PKCS12 --ks-pass pass:android --ks-key-alias 1 --key-pass pass:android --out apk/signed.apk apk/stripped.apk
             apksigner verify apk/signed.apk && echo "signature verified"
             echo "INSTALL_APK=apk/signed.apk" >> "$GITHUB_ENV"
           fi
