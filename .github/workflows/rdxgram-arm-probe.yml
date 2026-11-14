@@ -127,6 +127,60 @@ jobs:
             echo "INSTALL_APK=apk/signed.apk" >> "$GITHUB_ENV"
           fi
 
+      # The package is com.instagram.android for the theme/base builds but
+      # com.rdx.gram for the side-by-side build — read it from the APK
+      # manifest instead of hardcoding it (the hardcoded check gave a
+      # false NOT_INSTALLED for side-by-side 1.0 in run 43599812321).
+      - name: Detect package name from the APK manifest
+        if: steps.binder.outputs.binder_present == 'yes'
+        run: |
+          PKG=$(python3 - <<'PY'
+          import glob, zipfile, struct
+          apk = glob.glob("apk/Instagram-*.apk")[0]
+          with zipfile.ZipFile(apk) as z:
+              axml = z.read("AndroidManifest.xml")
+          # string pool (UTF-8 or UTF-16)
+          flags = struct.unpack_from("<I", axml, 8 + 16)[0]
+          count = struct.unpack_from("<I", axml, 8 + 8)[0]
+          strings_start = struct.unpack_from("<I", axml, 8 + 20)[0]
+          offs = struct.unpack_from(f"<{count}I", axml, 8 + 28)
+          pool = axml[8:]
+          def get_string(idx):
+              p = strings_start + offs[idx]
+              if flags & 0x100:
+                  b = pool[p]
+                  ln, p = ((b & 0x7F) << 8 | pool[p+1], p+2) if b & 0x80 else (b, p+1)
+                  b = pool[p]
+                  p = p+2 if b & 0x80 else p+1
+                  return pool[p:p+ln].decode("utf-8", "replace")
+              ln = struct.unpack_from("<H", pool, p)[0]
+              p += 2
+              if ln & 0x8000:
+                  ln = ((ln & 0x7FFF) << 16) | struct.unpack_from("<H", pool, p)[0]
+                  p += 2
+              return pool[p:p+ln*2].decode("utf-16-le", "replace")
+          strings = [get_string(i) for i in range(count)]
+          # first START_ELEMENT chunk (<manifest>)
+          p = 8 + struct.unpack_from("<I", pool, 4)[0]
+          while p < len(axml):
+              ctype, hsize, size = struct.unpack_from("<HHI", axml, p)
+              if ctype == 0x0102:
+                  astart, asize, acount = struct.unpack_from("<HHH", axml, p + 24)
+                  for i in range(acount):
+                      a = p + 16 + astart + i * asize
+                      name_idx = struct.unpack_from("<I", axml, a + 4)[0]
+                      if strings[name_idx] == "package":
+                          dtype = axml[a + 15]
+                          data = struct.unpack_from("<I", axml, a + 16)[0]
+                          print(strings[data] if dtype == 3 else data)
+                          raise SystemExit(0)
+              p += size
+          raise SystemExit("package attribute not found")
+          PY
+          )
+          echo "package=$PKG"
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+
       - name: Boot Redroid and test the APK
         if: steps.binder.outputs.binder_present == 'yes'
         run: |
@@ -178,7 +232,7 @@ jobs:
           # Try the install even if boot_completed is not 1 yet; judge by
           # whether the package actually lands, not by the step exit code.
           adb install -r "$INSTALL_APK" || echo "adb install failed (see above)"
-          if adb shell pm list packages 2>/dev/null | grep -q com.instagram.android; then
+          if adb shell pm list packages 2>/dev/null | grep -q "$PKG"; then
             echo "installed" | tee -a status.txt
             # Launch with `am start`, not monkey: monkey exits -5 without
             # launching anything on Redroid 13 (probe run 43596433654 — it
@@ -190,7 +244,7 @@ jobs:
             echo "== launcher activity ==" | tee launch.txt
             LAUNCHER=""
             for i in $(seq 1 6); do
-              LAUNCHER=$(adb shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.instagram.android 2>/dev/null | tr -d '\r' | tail -1)
+              LAUNCHER=$(adb shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "$PKG" 2>/dev/null | tr -d '\r' | tail -1)
               [ -n "$LAUNCHER" ] && break
               sleep 5
             done
@@ -199,10 +253,10 @@ jobs:
               adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n "$LAUNCHER" 2>&1 | tee -a launch.txt || true
             else
               echo "no launcher activity resolved, trying implicit intent" | tee -a launch.txt
-              adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.instagram.android 2>&1 | tee -a launch.txt || true
+              adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "$PKG" 2>&1 | tee -a launch.txt || true
             fi
             sleep 45
-            adb shell pidof com.instagram.android > pid.txt 2>&1 || echo "not-running" > pid.txt
+            adb shell pidof "$PKG" > pid.txt 2>&1 || echo "not-running" > pid.txt
             adb logcat -d > logcat.txt
             if grep -q "FATAL EXCEPTION" logcat.txt; then
               echo "CRASHED" > status.txt
