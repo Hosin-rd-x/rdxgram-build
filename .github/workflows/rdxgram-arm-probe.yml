@@ -9,7 +9,9 @@
 # truth about whether the app really launches.
 #
 # Trigger: manual only (workflow_dispatch). Input apk_tag defaults to the
-# theme 1.1 release. The job does NOT fail when the app crashes — a crash is
+# release under test (currently the STOCK Instagram 451 APK, as a control:
+# if stock itself does not launch on Redroid, no modified build can be
+# judged against this probe). The job does NOT fail when the app crashes — a crash is
 # a result, not a CI failure. Verdict lives in status.txt in the artifact.
 #
 # Step 1 (always runs): probe the runner kernel for Android binder/ashmem.
@@ -26,7 +28,7 @@ on:
       apk_tag:
         description: "Release tag of the already-built APK to test"
         required: true
-        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.0"
+        default: "instagram-451.0.0.53.80-stock"
 
 permissions:
   contents: read
@@ -91,7 +93,7 @@ jobs:
         run: |
           if ! command -v gh >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y gh; fi
           mkdir -p apk
-          gh release download "${{ inputs.apk_tag }}" -p 'Instagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk
+          gh release download "${{ inputs.apk_tag }}" -p '*nstagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk
           ls -la apk
           sha256sum apk/*.apk
 
@@ -105,7 +107,7 @@ jobs:
         if: steps.binder.outputs.binder_present == 'yes'
         run: |
           set -x
-          APK=$(ls apk/Instagram-*.apk | head -1)
+          APK=$(ls apk/*nstagram-*.apk | head -1)
           echo "downloaded APK: $APK"
           if python3 .github/scripts/strip_required_splits.py --check "$APK"; then
             echo "requiredSplitTypes absent, installing as downloaded"
@@ -136,7 +138,7 @@ jobs:
         run: |
           PKG=$(python3 - <<'PY'
           import glob, zipfile, struct
-          apk = glob.glob("apk/Instagram-*.apk")[0]
+          apk = glob.glob("apk/*nstagram-*.apk")[0]
           with zipfile.ZipFile(apk) as z:
               axml = z.read("AndroidManifest.xml")
           # string pool (UTF-8 or UTF-16)
