@@ -1,0 +1,1508 @@
+{
+ "drawables": {
+  "0x7f08007d": "abc_btn_check_to_on_mtrl_000",
+  "0x7f08007e": "abc_btn_check_to_on_mtrl_015",
+  "0x7f080083": "abc_btn_radio_to_on_mtrl_000",
+  "0x7f080084": "abc_btn_radio_to_on_mtrl_015",
+  "0x7f080085": "abc_btn_switch_to_on_mtrl_00001",
+  "0x7f080086": "abc_btn_switch_to_on_mtrl_00012",
+  "0x7f08009d": "abc_list_focused_holo",
+  "0x7f08009e": "abc_list_longpressed_holo",
+  "0x7f08009f": "abc_list_pressed_holo_dark",
+  "0x7f0800a0": "abc_list_pressed_holo_light",
+  "0x7f0800a3": "abc_list_selector_disabled_holo_dark",
+  "0x7f0800a4": "abc_list_selector_disabled_holo_light",
+  "0x7f0800b9": "abc_tab_indicator_mtrl_alpha",
+  "0x7f0800be": "abc_textfield_activated_mtrl_alpha",
+  "0x7f0800bf": "abc_textfield_default_mtrl_alpha",
+  "0x7f0800c0": "abc_textfield_search_activated_mtrl_alpha",
+  "0x7f0800c1": "abc_textfield_search_default_mtrl_alpha",
+  "0x7f08035d": "browser_back",
+  "0x7f08035f": "browser_forward",
+  "0x7f0803bc": "camera_shadow_fill",
+  "0x7f0803bd": "camera_shadow_outline",
+  "0x7f08052d": "default_album_art_icon",
+  "0x7f081867": "fb_ic_profile_filled_24",
+  "0x7f081db2": "fbui_check_on",
+  "0x7f081db3": "fbui_check_on_disabled_dark",
+  "0x7f081db4": "fbui_check_on_disabled_light",
+  "0x7f081db5": "fbui_check_on_pressed_dark",
+  "0x7f081db6": "fbui_check_on_pressed_light",
+  "0x7f081dc2": "fbui_edit_text_default",
+  "0x7f081dc3": "fbui_edit_text_focused",
+  "0x7f081dc4": "fbui_edit_text_focused_dark",
+  "0x7f081ddc": "fbui_radio_on_dark",
+  "0x7f081ddf": "fbui_radio_on_light",
+  "0x7f081de3": "fbui_spinner_base_default",
+  "0x7f081de4": "fbui_spinner_base_pressed",
+  "0x7f081de6": "fbui_spinner_nub",
+  "0x7f082185": "input",
+  "0x7f082188": "input_highlighted",
+  "0x7f082189": "input_night",
+  "0x7f0821a0": "instagram_add_filled_16",
+  "0x7f0821a4": "instagram_add_outline_44",
+  "0x7f0821df": "instagram_app_icloud_warning_pano_outline_24",
+  "0x7f0821fb": "instagram_app_threads_pano_outline_12",
+  "0x7f08221b": "instagram_arrow_filled_44",
+  "0x7f082221": "instagram_arrow_outline_44",
+  "0x7f082256": "instagram_avatars_pano_filled_24",
+  "0x7f082257": "instagram_avatars_pano_outline_24",
+  "0x7f08230d": "instagram_casting_outline_24",
+  "0x7f082324": "instagram_check_pano_filled_16",
+  "0x7f08232d": "instagram_chevron_down_outline_16",
+  "0x7f082336": "instagram_chevron_left_outline_12",
+  "0x7f082347": "instagram_chevron_right_pano_outline_12",
+  "0x7f082350": "instagram_chisel_filled_44",
+  "0x7f082351": "instagram_chisel_outline_44",
+  "0x7f082354": "instagram_circle_add_filled_16",
+  "0x7f082388": "instagram_circle_subtract_pano_filled_24",
+  "0x7f08238d": "instagram_circle_x_outline_16",
+  "0x7f08239d": "instagram_clock_filled_24",
+  "0x7f08239f": "instagram_clock_outline_24",
+  "0x7f082418": "instagram_crown_pano_filled_12",
+  "0x7f082419": "instagram_crown_pano_filled_16",
+  "0x7f082442": "instagram_direct_prism_filled_12",
+  "0x7f082443": "instagram_direct_prism_filled_16",
+  "0x7f082496": "instagram_eraser_filled_44",
+  "0x7f082499": "instagram_eraser_outline_44",
+  "0x7f0824aa": "instagram_eye_off_outline_18",
+  "0x7f0824b3": "instagram_eye_outline_18",
+  "0x7f0824bc": "instagram_face1_pano_outline_24",
+  "0x7f0824cf": "instagram_facebook_circle_filled_12",
+  "0x7f0824d4": "instagram_facebook_circle_pano_filled_24",
+  "0x7f0824df": "instagram_feeds_filled_24",
+  "0x7f0824e0": "instagram_feeds_outline_24",
+  "0x7f08255c": "instagram_heart_filled_16",
+  "0x7f08255f": "instagram_heart_filled_44",
+  "0x7f082565": "instagram_heart_outline_44",
+  "0x7f082617": "instagram_insights_pano_filled_24",
+  "0x7f082659": "instagram_location_arrow_filled_12",
+  "0x7f082668": "instagram_location_off_filled_12",
+  "0x7f08268d": "instagram_magic_filled_44",
+  "0x7f08268e": "instagram_magic_outline_44",
+  "0x7f082694": "instagram_marker_filled_44",
+  "0x7f082695": "instagram_marker_outline_44",
+  "0x7f0826d8": "instagram_mix_pano_outline_20",
+  "0x7f0826dd": "instagram_moon_pano_filled_12",
+  "0x7f08270b": "instagram_music_pano_filled_12",
+  "0x7f082750": "instagram_payments_icons_radio",
+  "0x7f08278d": "instagram_pin_pano_filled_16",
+  "0x7f0827d9": "instagram_reels_pano_prism_filled_32",
+  "0x7f0827f9": "instagram_reply_outline_16",
+  "0x7f08280c": "instagram_reshare_pano_outline_16",
+  "0x7f08281b": "instagram_save_filled_44",
+  "0x7f082820": "instagram_save_outline_44",
+  "0x7f0828a9": "instagram_special_filled_44",
+  "0x7f0828aa": "instagram_special_outline_44",
+  "0x7f0828e6": "instagram_story_highlight_pano_outline_24",
+  "0x7f082917": "instagram_text_bg_filled_44",
+  "0x7f082919": "instagram_text_bg_outline_44",
+  "0x7f0829f2": "instagram_volume_off_pano_outline_24",
+  "0x7f0829f9": "instagram_volume_pano_outline_24",
+  "0x7f0829fb": "instagram_warning_filled_12",
+  "0x7f0829fd": "instagram_warning_outline_16",
+  "0x7f082a69": "legacy_tag_close",
+  "0x7f082a6b": "legacy_tag_close_pressed",
+  "0x7f082a8c": "loadmore_icon_add",
+  "0x7f082a8d": "loadmore_icon_add_pressed",
+  "0x7f082a8f": "loadmore_icon_refresh",
+  "0x7f082a91": "loadmore_icon_refresh_pressed",
+  "0x7f082cb2": "persp_x_off",
+  "0x7f082cb3": "persp_x_on",
+  "0x7f082cb4": "persp_y_off",
+  "0x7f082cb5": "persp_y_on",
+  "0x7f082dd2": "radio_button_checked",
+  "0x7f082dd4": "radio_button_unchecked",
+  "0x7f082f03": "rotate_off",
+  "0x7f082f04": "rotate_on",
+  "0x7f082f6e": "selected_check",
+  "0x7f0831b5": "unchecked",
+  "0x7f0831c8": "upload_track",
+  "0x7f0831c9": "upload_track_background"
+ },
+ "xml_stubs": {
+  "0x7f080587": "direct_reply_bar_voice_message_indicator",
+  "0x7f083006": "stories_background_color_picker_color_pickernoshadow"
+ },
+ "dimens": {
+  "0x7f070146": [
+   "direct_composer_background_corner_radius",
+   "25dp"
+  ],
+  "0x7f070264": [
+   "tab_bar_height_whiteout",
+   "48dp"
+  ]
+ },
+ "xml_fixes": {
+  "res/drawable/groups_reshare_send_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_direct_prism_filled_12"
+   }
+  ],
+  "res/drawable/highlights_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_story_highlight_pano_outline_24"
+   }
+  ],
+  "res/drawable/ig_cross_app_linking_whatsapp_illustration.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": null
+   }
+  ],
+  "res/drawable/ig_iab_navigation_back.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/browser_back"
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": "@drawable/browser_back"
+   }
+  ],
+  "res/drawable/ig_iab_navigation_back_dark_mode.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/browser_back"
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": "@drawable/browser_back"
+   }
+  ],
+  "res/drawable/ig_iab_navigation_forward.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/browser_forward"
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": "@drawable/browser_forward"
+   }
+  ],
+  "res/drawable/ig_iab_navigation_forward_dark_mode.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/browser_forward"
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": "@drawable/browser_forward"
+   }
+  ],
+  "res/drawable/input_background_night.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/input_highlighted"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/input_night"
+   }
+  ],
+  "res/drawable/input_background.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/input_highlighted"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/input"
+   }
+  ],
+  "res/drawable/instagram_avatar_selector_new.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_avatars_pano_filled_24"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_avatars_pano_outline_24"
+   }
+  ],
+  "res/drawable/fbui_spinner_default.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/fbui_spinner_nub"
+   },
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/fbui_spinner_base_default"
+   }
+  ],
+  "res/drawable/fbui_spinner_pressed.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/fbui_spinner_nub"
+   },
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/fbui_spinner_base_pressed"
+   }
+  ],
+  "res/drawable/fbui_checkbox_dark.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/fbui_check_on_pressed_dark"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/fbui_check_on"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/fbui_check_on_disabled_dark"
+   }
+  ],
+  "res/drawable/fbui_checkbox_light.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/fbui_check_on_pressed_light"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/fbui_check_on"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/fbui_check_on_disabled_light"
+   }
+  ],
+  "res/drawable/fbui_edit_text.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/fbui_edit_text_focused"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/fbui_edit_text_focused"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/fbui_edit_text_default"
+   },
+   {
+    "attr": "drawable",
+    "index": 3,
+    "new": "@drawable/fbui_edit_text_default"
+   }
+  ],
+  "res/drawable/fbui_edit_text_dark.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/fbui_edit_text_focused_dark"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/fbui_edit_text_focused_dark"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/fbui_edit_text_default"
+   },
+   {
+    "attr": "drawable",
+    "index": 3,
+    "new": "@drawable/fbui_edit_text_default"
+   }
+  ],
+  "res/drawable/fbui_radio_dark.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/fbui_radio_on_dark"
+   }
+  ],
+  "res/drawable/fbui_radio_light.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/fbui_radio_on_light"
+   }
+  ],
+  "res/drawable/flash_states.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   }
+  ],
+  "res/drawable/flash_states_levels.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 3,
+    "new": null
+   }
+  ],
+  "res/drawable/friend_map_not_sharing_arrow_indicator.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_location_arrow_filled_12"
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": "@drawable/instagram_location_off_filled_12"
+   }
+  ],
+  "res/drawable/friend_map_sharing_indicator.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_location_arrow_filled_12"
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": "@drawable/instagram_location_arrow_filled_12"
+   }
+  ],
+  "res/drawable/friend_map_warning_indicator.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_warning_filled_12"
+   }
+  ],
+  "res/drawable/gray_heart_drawable.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_heart_filled_16"
+   }
+  ],
+  "res/drawable/music_mix_nux_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_mix_pano_outline_20"
+   }
+  ],
+  "res/drawable/music_note_pog_indicator.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": null
+   }
+  ],
+  "res/drawable/music_note_pog_indicator_pink.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": null
+   }
+  ],
+  "res/drawable/overlay_arrow_brush_states.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_arrow_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_arrow_outline_44"
+   }
+  ],
+  "res/drawable/overlay_chisel_states.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_chisel_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_chisel_outline_44"
+   }
+  ],
+  "res/drawable/overlay_eraser_states.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_eraser_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_eraser_outline_44"
+   }
+  ],
+  "res/drawable/overlay_marker_states.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_marker_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_marker_outline_44"
+   }
+  ],
+  "res/drawable/overlay_neon_states.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_magic_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_magic_outline_44"
+   }
+  ],
+  "res/drawable/overlay_special_brush_states.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_special_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_special_outline_44"
+   }
+  ],
+  "res/drawable/note_reshare_outline_drawable.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_reshare_pano_outline_16"
+   }
+  ],
+  "res/drawable-night/notes_color_picker_wheel.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/stories_background_color_picker_color_pickernoshadow"
+   }
+  ],
+  "res/drawable/notes_color_picker_wheel.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/stories_background_color_picker_color_pickernoshadow"
+   }
+  ],
+  "res/drawable/notes_self_pog_plus_badge.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_add_filled_16"
+   }
+  ],
+  "res/drawable/perspectivex_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/persp_x_on"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/persp_x_off"
+   }
+  ],
+  "res/drawable/perspectivey_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/persp_y_on"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/persp_y_off"
+   }
+  ],
+  "res/drawable/prism_checkbox_checked.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_check_pano_filled_16"
+   }
+  ],
+  "res/drawable/prism_checkbox_checked_on_media.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_check_pano_filled_16"
+   }
+  ],
+  "res/drawable/prism_checkbox_state_selector_ax_fix.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_check_pano_filled_16"
+   }
+  ],
+  "res/drawable/prism_checkbox_state_selector_on_media.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_check_pano_filled_16"
+   }
+  ],
+  "res/drawable/profile_banner_tape_background.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": null
+   }
+  ],
+  "res/drawable/profile_circle_fg.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_circle_subtract_pano_filled_24"
+   }
+  ],
+  "res/drawable/progress_horizontal_upload.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/upload_track_background"
+   },
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/upload_track"
+   }
+  ],
+  "res/drawable/quiet_mode_indicator_badge.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_moon_pano_filled_12"
+   }
+  ],
+  "res/drawable/quiet_mode_indicator_badge_night.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_moon_pano_filled_12"
+   }
+  ],
+  "res/drawable/radio_button_state_selector.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_payments_icons_radio"
+   }
+  ],
+  "res/drawable/recipe_sheet_icon_music.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_music_pano_filled_12"
+   }
+  ],
+  "res/drawable/right_image_stroke.xml": [
+   {
+    "attr": "width",
+    "index": 0,
+    "new": "@dimen/circular_avatar_stroke_width"
+   }
+  ],
+  "res/drawable/rotation_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/rotate_on"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/rotate_off"
+   }
+  ],
+  "res/drawable/instagram_chevron_right_outline_rtl_12.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_chevron_right_pano_outline_12"
+   }
+  ],
+  "res/drawable/instagram_chevron_left_outline_rtl_12.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_chevron_left_outline_12"
+   }
+  ],
+  "res/drawable/instagram_clock_selector.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_clock_filled_24"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_clock_outline_24"
+   }
+  ],
+  "res/drawable/instagram_emoji_selector.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_face1_pano_outline_24"
+   }
+  ],
+  "res/drawable/instagram_feeds_drawable_24.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_feeds_filled_24"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_feeds_outline_24"
+   }
+  ],
+  "res/drawable/instagram_pin_selector.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_pin_pano_filled_16"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_pin_pano_filled_16"
+   }
+  ],
+  "res/drawable/instagram_reply_flipped_outline_16.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_reply_outline_16"
+   }
+  ],
+  "res/drawable/instagram_splash_screen.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram"
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": "@drawable/from_meta_attribution"
+   }
+  ],
+  "res/drawable/lead_gen_radio_button_state_selector_on_media.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/radio_button_checked"
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": "@drawable/radio_button_unchecked"
+   }
+  ],
+  "res/drawable/left_image_stroke.xml": [
+   {
+    "attr": "width",
+    "index": 0,
+    "new": "@dimen/circular_avatar_stroke_width"
+   }
+  ],
+  "res/drawable/legacy_tag_close_bg.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/legacy_tag_close_pressed"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/legacy_tag_close"
+   }
+  ],
+  "res/drawable/loadmore_add_compound.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/loadmore_icon_add_pressed"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/loadmore_icon_add"
+   }
+  ],
+  "res/drawable/loadmore_icon_refresh_compound.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/loadmore_icon_refresh_pressed"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/loadmore_icon_refresh"
+   }
+  ],
+  "res/drawable/mini_pdp_product_disclosure_warning.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_warning_outline_16"
+   }
+  ],
+  "res/drawable/sign_in_visibility_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_eye_off_outline_18"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_eye_outline_18"
+   }
+  ],
+  "res/drawable/share_on_icon_new.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": null
+   }
+  ],
+  "res/drawable/stories_toolbar_save_button_drawable.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_save_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_save_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/instagram_save_outline_44"
+   }
+  ],
+  "res/drawable/story_camera_flash_states.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   }
+  ],
+  "res/drawable/tab_dynamic_channels_drawable.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   }
+  ],
+  "res/drawable/tab_dynamic_insights_drawable.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_insights_pano_filled_24"
+   }
+  ],
+  "res/drawable/tab_dynamic_instants_drawable.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   }
+  ],
+  "res/drawable/tab_dynamic_your_stuff_drawable.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": null
+   }
+  ],
+  "res/drawable/story_viewers_list_interaction_badge_like.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_heart_filled_16"
+   }
+  ],
+  "res/drawable/story_viewers_list_interaction_badge_reply.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_direct_prism_filled_16"
+   }
+  ],
+  "res/drawable/subscriptions_crown_badge_drawable.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_crown_pano_filled_12"
+   }
+  ],
+  "res/drawable/tab_prism_reels_drawable.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": null
+   }
+  ],
+  "res/drawable/text_emphasis_states.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_text_bg_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_text_bg_outline_44"
+   }
+  ],
+  "res/drawable/unseen_reels_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_reels_pano_prism_filled_32"
+   }
+  ],
+  "res/drawable/upload_indeterminate_background.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/upload_track_background"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/upload_track"
+   }
+  ],
+  "res/drawable/videocall_user_feedback_star.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": null
+   }
+  ],
+  "res/drawable/videocall_user_feedback_star_filled.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": null
+   }
+  ],
+  "res/drawable/xav_compact_half_sheet_fb_badge.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   }
+  ],
+  "res/drawable/xav_default_avatar_circle.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/fb_ic_profile_filled_24"
+   }
+  ],
+  "res/drawable/abc_edit_text_material.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/abc_textfield_default_mtrl_alpha"
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": "@drawable/abc_textfield_default_mtrl_alpha"
+   },
+   {
+    "attr": "src",
+    "index": 2,
+    "new": "@drawable/abc_textfield_activated_mtrl_alpha"
+   }
+  ],
+  "res/drawable/instant_splash_placeholder_top.xml": [
+   {
+    "attr": "height",
+    "index": 0,
+    "new": "@dimen/tab_bar_height_whiteout"
+   },
+   {
+    "attr": "top",
+    "index": 0,
+    "new": "@dimen/tab_bar_height_whiteout"
+   }
+  ],
+  "res/drawable-v31/from_meta_gradient_padded.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/from_meta_attribution"
+   }
+  ],
+  "res/drawable-v31/instagram_padded.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram"
+   }
+  ],
+  "res/drawable/abc_item_background_holo_dark.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_list_selector_disabled_holo_dark"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_list_selector_disabled_holo_dark"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/abc_list_focused_holo"
+   }
+  ],
+  "res/drawable/abc_item_background_holo_light.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_list_selector_disabled_holo_light"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_list_selector_disabled_holo_light"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/abc_list_focused_holo"
+   }
+  ],
+  "res/drawable/abc_list_selector_background_transition_holo_dark.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_list_pressed_holo_dark"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_list_longpressed_holo"
+   }
+  ],
+  "res/drawable/abc_list_selector_background_transition_holo_light.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_list_pressed_holo_light"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_list_longpressed_holo"
+   }
+  ],
+  "res/drawable/abc_list_selector_holo_dark.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_list_selector_disabled_holo_dark"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_list_selector_disabled_holo_dark"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/abc_list_focused_holo"
+   }
+  ],
+  "res/drawable/abc_list_selector_holo_light.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_list_selector_disabled_holo_light"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_list_selector_disabled_holo_light"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/abc_list_focused_holo"
+   }
+  ],
+  "res/drawable/abc_seekbar_thumb_material.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": null
+   },
+   {
+    "attr": "src",
+    "index": 1,
+    "new": null
+   },
+   {
+    "attr": "src",
+    "index": 2,
+    "new": null
+   },
+   {
+    "attr": "src",
+    "index": 3,
+    "new": null
+   }
+  ],
+  "res/drawable/abc_btn_check_material.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_btn_check_to_on_mtrl_015"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_btn_check_to_on_mtrl_000"
+   }
+  ],
+  "res/drawable/abc_btn_radio_material.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_btn_radio_to_on_mtrl_015"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_btn_radio_to_on_mtrl_000"
+   }
+  ],
+  "res/drawable/add_story_cta_circular.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_circle_add_filled_16"
+   }
+  ],
+  "res/drawable/abc_spinner_textfield_background_material.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_textfield_default_mtrl_alpha"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/abc_textfield_activated_mtrl_alpha"
+   },
+   {
+    "attr": "drawable",
+    "index": 3,
+    "new": null
+   }
+  ],
+  "res/drawable/abc_switch_thumb_material.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_btn_switch_to_on_mtrl_00012"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_btn_switch_to_on_mtrl_00001"
+   }
+  ],
+  "res/drawable/abc_tab_indicator_material.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_tab_indicator_mtrl_alpha"
+   }
+  ],
+  "res/drawable/abc_textfield_search_material.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/abc_textfield_search_activated_mtrl_alpha"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/abc_textfield_search_activated_mtrl_alpha"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/abc_textfield_search_default_mtrl_alpha"
+   },
+   {
+    "attr": "drawable",
+    "index": 3,
+    "new": "@drawable/abc_textfield_search_default_mtrl_alpha"
+   }
+  ],
+  "res/drawable/audio_mute.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_volume_off_pano_outline_24"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_volume_pano_outline_24"
+   }
+  ],
+  "res/drawable/avatar_bottom_badge_facebook.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_facebook_circle_filled_12"
+   }
+  ],
+  "res/drawable/avatar_bottom_badge_facebook_white_background.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_facebook_circle_filled_12"
+   }
+  ],
+  "res/drawable/avatar_bottom_badge_threads.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_app_threads_pano_outline_12"
+   }
+  ],
+  "res/drawable/avatar_effect_placeholder.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_add_outline_44"
+   }
+  ],
+  "res/drawable/blue_checkbox_background.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/selected_check"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/unchecked"
+   }
+  ],
+  "res/drawable/bugreporter_screenshot_remove.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_circle_x_outline_16"
+   }
+  ],
+  "res/drawable/camera_shadow.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/camera_shadow_fill"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/camera_shadow_outline"
+   }
+  ],
+  "res/drawable/center_image_stroke.xml": [
+   {
+    "attr": "width",
+    "index": 0,
+    "new": "@dimen/circular_avatar_stroke_width"
+   }
+  ],
+  "res/drawable/clips_casting_nudge_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_casting_outline_24"
+   }
+  ],
+  "res/drawable/clips_like_button_drawable.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_heart_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_heart_filled_44"
+   },
+   {
+    "attr": "drawable",
+    "index": 2,
+    "new": "@drawable/instagram_heart_outline_44"
+   }
+  ],
+  "res/drawable/clips_reply_message_composer_background.xml": [
+   {
+    "attr": "radius",
+    "index": 0,
+    "new": "@dimen/direct_composer_background_corner_radius"
+   }
+  ],
+  "res/drawable/close_dialog_button.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": null
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": null
+   }
+  ],
+  "res/drawable/clips_viewer_escape_hatch_chevron.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_chevron_down_outline_16"
+   }
+  ],
+  "res/drawable/clips_viewer_reply_view_background.xml": [
+   {
+    "attr": "radius",
+    "index": 0,
+    "new": "@dimen/direct_composer_background_corner_radius"
+   }
+  ],
+  "res/drawable/cloud_warning_icon_resized.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_app_icloud_warning_pano_outline_24"
+   }
+  ],
+  "res/drawable/default_album_art.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/default_album_art_icon"
+   }
+  ],
+  "res/drawable/direct_reply_bar_voice_message_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/direct_reply_bar_voice_message_indicator"
+   }
+  ],
+  "res/drawable/direct_composer_bar_emoji_toolbar_composer_background.xml": [
+   {
+    "attr": "radius",
+    "index": 0,
+    "new": "@dimen/direct_composer_background_corner_radius"
+   }
+  ],
+  "res/drawable/direct_composer_bar_emoji_toolbar_composer_background_night.xml": [
+   {
+    "attr": "radius",
+    "index": 0,
+    "new": "@dimen/direct_composer_background_corner_radius"
+   }
+  ],
+  "res/drawable/direct_composer_bar_redesign_composer_background.xml": [
+   {
+    "attr": "radius",
+    "index": 0,
+    "new": "@dimen/direct_composer_background_corner_radius"
+   }
+  ],
+  "res/drawable/direct_dark_mode_composer_bar_redesign_background.xml": [
+   {
+    "attr": "radius",
+    "index": 0,
+    "new": "@dimen/direct_composer_background_corner_radius"
+   }
+  ],
+  "res/drawable/direct_light_mode_composer_bar_redesign_background.xml": [
+   {
+    "attr": "radius",
+    "index": 0,
+    "new": "@dimen/direct_composer_background_corner_radius"
+   }
+  ],
+  "res/drawable/exclusive_content_audience_selector_crown.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_crown_pano_filled_12"
+   }
+  ],
+  "res/drawable/exclusive_story_facepile.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_crown_pano_filled_16"
+   }
+  ],
+  "res/drawable/exclusive_story_recipient_picker.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_crown_pano_filled_16"
+   }
+  ],
+  "res/drawable/facebook_avatar_bottom_badge_black.xml": [
+   {
+    "attr": "src",
+    "index": 0,
+    "new": "@drawable/instagram_facebook_circle_filled_12"
+   }
+  ],
+  "res/drawable/facebook_share_icon.xml": [
+   {
+    "attr": "drawable",
+    "index": 0,
+    "new": "@drawable/instagram_facebook_circle_pano_filled_24"
+   },
+   {
+    "attr": "drawable",
+    "index": 1,
+    "new": "@drawable/instagram_facebook_circle_pano_filled_24"
+   }
+  ]
+ },
+ "unidentified_holes": [
+  "0x7f0800aa",
+  "0x7f0800ab",
+  "0x7f0800ac",
+  "0x7f0800b2",
+  "0x7f08053d",
+  "0x7f08053e",
+  "0x7f08072e",
+  "0x7f082003",
+  "0x7f0820cb",
+  "0x7f08228d",
+  "0x7f08228e",
+  "0x7f0824f4",
+  "0x7f0824f5",
+  "0x7f0824f6",
+  "0x7f0824f9",
+  "0x7f0824fe",
+  "0x7f0824ff",
+  "0x7f08258e",
+  "0x7f0826a7",
+  "0x7f0826f6",
+  "0x7f082758",
+  "0x7f0827e0",
+  "0x7f0827e1",
+  "0x7f0828c3",
+  "0x7f0828c7"
+ ]
+}

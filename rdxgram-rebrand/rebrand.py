@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Rebrand a decoded Instagram APK (apktool output) for a side-by-side install.
 
-Usage: rebrand.py <decoded-dir> <icons-dir>
+Usage: rebrand.py <decoded-dir> <icons-dir> [split-drawables-dir]
+       [split-drawables-2k-dir]
 
 What it does (only these, nothing else):
 
@@ -111,6 +112,53 @@ What it does (only these, nothing else):
      grows by ~12.7 MB (9.0 -> 21.7 MB) and the APK by ~13 MB
      (152 -> 165 MB). That is the price of the original ids, and
      the ids are what the bundled layouts reference, so it stays.
+
+  D4. Play-split XML drawables (step 2k): the 1.3 probe (run
+     43612809179) got past the main activity and the signed-out
+     Bloks screen, then crashed opening the login modal:
+     NotFoundException "Drawable com.rdx.gram:drawable/input_
+     background with resource ID #0x7f082186" while a Bloks
+     FlexLayout measured the login form. input_background is a
+     selector whose two items apktool decoded as @null — but the
+     stock APK's own compiled XML references 0x7f082185 (input)
+     and 0x7f082188 (input_highlighted), two 9-patches that live
+     only in the Play density split; a selector whose items are
+     @null cannot load (loadDrawableForCookie throws). apktool
+     renders EVERY dangling reference as @null, so the same trap
+     hides in all XML drawables. 2k was built from a full audit
+     of the 5,484 drawable XML files in the stock APK (androguard
+     AXML parse of each, references checked against the stock
+     arsc): 1,760 files reference a hole, but only 130 files with
+     throwing root types (selector, layer-list, ripple, inset,
+     scale, clip, animated-selector, animated-vector, level-list,
+     transition, shape) can crash on load — 215 references, 148
+     distinct holes. The other 1,630 files are Instagram/Facebook
+     custom wrappers (AppFbIconDrawable, PrismSwappingDrawable,
+     ...) whose own code tolerates a missing original (the main
+     activity already renders with hundreds of them missing), so
+     they are left alone. The 148 holes were identified by the
+     same alphabetical-neighbour alignment with InstaPro 439 as
+     2j (stock ids are alphabetical by name; a gap of N holes
+     between two present names maps to the N InstaPro names
+     between the same names): 123 identified (119 images, 2
+     AppRedrawableDrawable stubs, 2 dimens), 25 unidentified
+     (version drift between 439 and 451 breaks the count in
+     their gaps — listed in the data file, left @null, to be
+     fixed if a probe ever names their file). 2k restores the
+     images + stubs + dimens at their original ids (data file
+     rdxgram-rebrand/split-restores-2k.json; image files in
+     rdxgram-rebrand/split-drawables-2k/) and rewrites the @nulls
+     in 131 XML files to @drawable/@dimen references, in document
+     order, verified at generation time by a parallel walk of the
+     stock compiled XML and the decoded XML. The two
+     AppRedrawableDrawable stubs (direct_reply_bar_voice_message_
+     indicator, stories_background_color_picker_color_picker_
+     noshadow) are server-asset handles, not files: the stub XML
+     is all the APK needs to instantiate the class; the bitmap
+     itself downloads from Meta's asset server at runtime (or
+     shows nothing if it cannot). The two extra dimens are
+     direct_composer_background_corner_radius 25dp (0x7f070146)
+     and tab_bar_height_whiteout 48dp (0x7f070264).
 
 
   D. Label string value (step 3): the shrunk label string's value in
@@ -881,6 +929,196 @@ def main():
             fh.write("\n".join(public_lines) + "\n")
         with open(strings_path, "w", encoding="utf-8") as fh:
             fh.write(strings_text)
+
+    # 2k. Sweep the Play-split XML drawables (see header, section
+    # D4): restore every identified throwing-set hole (images,
+    # stubs, dimens) at its original id, and rewrite the @nulls
+    # apktool left in 131 XML drawables to real references. The
+    # data file split-restores-2k.json (next to this script) is the
+    # single source of truth; the image/stub files live in the
+    # 4th-argument dir (rdxgram-rebrand/split-drawables-2k). A
+    # missing dir or data file skips 2k (the layout-values gate
+    # fails the build without the login-modal nine-patches); any
+    # listed restore that cannot be applied is fatal.
+    split_dir2k = sys.argv[4] if len(sys.argv) > 4 else None
+    data_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "split-restores-2k.json",
+    )
+    if split_dir2k is None or not os.path.isfile(data_path):
+        changes.append("2k SKIPPED: no split-drawables-2k dir (4th "
+                       "argument) or split-restores-2k.json not found")
+    else:
+        import json as _json
+        with open(data_path, "r", encoding="utf-8") as fh:
+            data2k = _json.load(fh)
+        public_path = os.path.join(decoded, "res", "values",
+                                   "public.xml")
+        if not os.path.isfile(public_path):
+            print("SPLIT_2K_MISSING: res/values/public.xml not found")
+            return 1
+        with open(public_path, "r", encoding="utf-8") as fh:
+            public_lines = fh.read().splitlines()
+        n_draw = n_stub = n_dim = n_xml = 0
+
+        def _drawable_base(fname):
+            # "input.9.png" -> "input" (one rsplit gives "input.9",
+            # which would miss the 9-patch); plain files keep the
+            # usual stem.
+            if fname.endswith(".9.png"):
+                return fname[:-6]
+            return fname.rsplit(".", 1)[0]
+
+        # (a) image drawables: same copy loop as 2j.
+        for rid_s, name in sorted(data2k.get("drawables", {}).items()):
+            rid = int(rid_s, 16)
+            copied = []
+            for dens in sorted(os.listdir(split_dir2k)):
+                if not dens.startswith("drawable-"):
+                    continue
+                for fname in sorted(os.listdir(
+                        os.path.join(split_dir2k, dens))):
+                    if _drawable_base(fname) != name:
+                        continue
+                    src = os.path.join(split_dir2k, dens, fname)
+                    dst_dir = os.path.join(decoded, "res", dens)
+                    os.makedirs(dst_dir, exist_ok=True)
+                    with open(src, "rb") as fh:
+                        blob = fh.read()
+                    with open(os.path.join(dst_dir, fname), "wb") as fh:
+                        fh.write(blob)
+                    copied.append("%s/%s" % (dens, fname))
+            if not copied:
+                print("SPLIT_2K_MISSING: no file for drawable %s (%s) "
+                      "in %s" % (name, rid_s, split_dir2k))
+                return 1
+            try:
+                public_lines = _insert_public_entry(
+                    public_lines, "drawable", name, rid)
+            except ValueError as exc:
+                print("SPLIT_2K_CONFLICT: %s" % exc)
+                return 1
+            n_draw += 1
+            changes.append("2k restore drawable %s -> %s (%s)"
+                           % (name, rid_s, ", ".join(copied)))
+        # (b) xml stubs (AppRedrawableDrawable): source XML under
+        # split_dir2k/drawable/ -> decoded res/drawable/.
+        for rid_s, name in sorted(data2k.get("xml_stubs", {}).items()):
+            rid = int(rid_s, 16)
+            src = os.path.join(split_dir2k, "drawable", name + ".xml")
+            if not os.path.isfile(src):
+                print("SPLIT_2K_MISSING: no stub for %s (%s)"
+                      % (name, rid_s))
+                return 1
+            with open(src, "rb") as fh:
+                blob = fh.read()
+            os.makedirs(os.path.join(decoded, "res", "drawable"),
+                        exist_ok=True)
+            with open(os.path.join(decoded, "res", "drawable",
+                                   name + ".xml"), "wb") as fh:
+                fh.write(blob)
+            try:
+                public_lines = _insert_public_entry(
+                    public_lines, "drawable", name, rid)
+            except ValueError as exc:
+                print("SPLIT_2K_CONFLICT: %s" % exc)
+                return 1
+            n_stub += 1
+            changes.append("2k restore xml stub %s -> %s" % (name, rid_s))
+        # (c) extra dimens: append to rdx_split_dimens.xml (2i
+        # created it) + public entries.
+        dimens_path = os.path.join(decoded, "res", "values",
+                                   "rdx_split_dimens.xml")
+        if os.path.isfile(dimens_path):
+            with open(dimens_path, "r", encoding="utf-8") as fh:
+                dtext = fh.read()
+            if "</resources>" not in dtext:
+                print("SPLIT_2K_MISSING: </resources> not found in "
+                      "rdx_split_dimens.xml")
+                return 1
+        else:
+            dtext = ('<?xml version="1.0" encoding="utf-8"?>\n'
+                     "<resources>\n</resources>\n")
+        for rid_s, (name, value) in sorted(
+                data2k.get("dimens", {}).items()):
+            rid = int(rid_s, 16)
+            if ('<dimen name="%s"' % name) not in dtext:
+                dtext = dtext.replace(
+                    "</resources>",
+                    '    <dimen name="%s">%s</dimen>\n</resources>'
+                    % (name, value), 1)
+            try:
+                public_lines = _insert_public_entry(
+                    public_lines, "dimen", name, rid)
+            except ValueError as exc:
+                print("SPLIT_2K_CONFLICT: %s" % exc)
+                return 1
+            n_dim += 1
+            changes.append("2k restore dimen %s -> %s (%s)"
+                           % (name, rid_s, value))
+        with open(dimens_path, "w", encoding="utf-8") as fh:
+            fh.write(dtext)
+        with open(public_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(public_lines) + "\n")
+        # (d) rewrite the @nulls in the XML drawables. For each
+        # file the fixes are applied in document order: the
+        # index-th occurrence (0-based, among that attr's @null
+        # values) of attr="@null" becomes attr="<new>". Fixes with
+        # new=None (unidentified holes) are skipped — the @null
+        # stays. After applying, the remaining @null count for each
+        # fixed attr must equal the skipped count, or the decoded
+        # tree differs from the one the fixes were generated
+        # against and the build fails loudly. The attr regex is
+        # boundary-anchored (an optional namespace prefix, then
+        # the local name) so "width" never matches inside
+        # "layout_width".
+        for rel, fixes in sorted(data2k.get("xml_fixes", {}).items()):
+            fpath = os.path.join(decoded, rel)
+            if not os.path.isfile(fpath):
+                print("SPLIT_2K_MISSING: xml fix target %s not found"
+                      % rel)
+                return 1
+            with open(fpath, "r", encoding="utf-8") as fh:
+                text = fh.read()
+            by_attr = {}
+            for fx in fixes:
+                by_attr.setdefault(fx["attr"], []).append(fx)
+            for attr, flist in by_attr.items():
+                pat = re.compile(
+                    r'(?<![\w.\-])((?:[A-Za-z_][\w.\-]*:)?'
+                    + re.escape(attr) + r'\s*=\s*")@null(")')
+                matches = list(pat.finditer(text))
+                skipped_n = sum(1 for fx in flist if fx["new"] is None)
+                # apply from the end so earlier offsets stay valid
+                for fx in sorted(flist, key=lambda f: f["index"],
+                                 reverse=True):
+                    if fx["new"] is None:
+                        continue
+                    idx = fx["index"]
+                    if idx >= len(matches):
+                        print("SPLIT_2K_MISMATCH: %s has only %d @null "
+                              "values for %s, fix wants index %d"
+                              % (rel, len(matches), attr, idx))
+                        return 1
+                    m = matches[idx]
+                    text = (text[:m.start()] + m.group(1) + fx["new"]
+                            + m.group(2) + text[m.end():])
+                remaining = len(list(pat.finditer(text)))
+                if remaining != skipped_n:
+                    print("SPLIT_2K_MISMATCH: %s: %d @null values left "
+                          "for %s, expected %d (skipped/unidentified)"
+                          % (rel, remaining, attr, skipped_n))
+                    return 1
+            with open(fpath, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            n_xml += 1
+            changes.append(
+                "2k xml fix %s: %d replacements (%d left @null)"
+                % (rel,
+                   sum(1 for fx in fixes if fx["new"] is not None),
+                   sum(1 for fx in fixes if fx["new"] is None)))
+        changes.append("2k total: %d drawables, %d xml stubs, %d dimens, "
+                       "%d xml files fixed" % (n_draw, n_stub, n_dim, n_xml))
 
     # 3. Label string value in every values*/strings.xml
     # (belt-and-suspenders for the literal manifest labels of 2g):

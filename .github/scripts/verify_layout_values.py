@@ -38,15 +38,26 @@ library only and asserts, for a rebuilt or LSPatch-patched APK:
     activity's bundled layouts need (verified_profile,
     instagram_chevron_down_pano_filled_12, instagram_x_pano_
     outline_8, instagram_call_pano_filled_12, from_meta_
-    attribution, instagram) and the six placeholder strings.
+    attribution, instagram) and the six placeholder strings;
+  - the Play-split XML-drawable sweep (rebrand step 2k) is present
+    at its ORIGINAL ids, driven by the same split-restores-2k.json
+    the rebrand reads: the 119 image drawables and 2 XML stubs
+    resolve to a file path containing their name, and the 2 extra
+    dimens resolve to their values (direct_composer_background_
+    corner_radius 25dp, tab_bar_height_whiteout 48dp). The login
+    modal's input_background selector depends on three of the
+    images (input, input_highlighted, input_night).
 
 Usage: verify_layout_values.py <apk>
 Exits 0 when every check passes, 1 otherwise.
 """
+import collections
+import json
+import os
+import re
 import struct
 import sys
 import zipfile
-import collections
 
 
 def _u16(b, o):
@@ -186,6 +197,27 @@ def resolve(entries, main_sp, tid, eid, depth=0):
     return None
 
 
+def _find_2k_json():
+    """Locate rdxgram-rebrand/split-restores-2k.json: repo layout
+    first (script lives in .github/scripts/), then the local
+    rdxgram-push copy, then next to this script."""
+    cands = [
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))),
+            "rdxgram-rebrand", "split-restores-2k.json"),
+        os.path.expanduser(
+            "~/workspace/rdxgram-push/rdxgram-rebrand/"
+            "split-restores-2k.json"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "split-restores-2k.json"),
+    ]
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
 def main():
     if len(sys.argv) != 2:
         print("usage: verify_layout_values.py <apk>")
@@ -292,6 +324,40 @@ def main():
         print(f"split restore string 0x7f13{eid:04x} {name} -> "
               f"{got!r}")
 
+    # The Play-split XML-drawable sweep (rebrand step 2k): every
+    # identified hole must exist at its ORIGINAL id — images and
+    # stubs resolve to a file path containing their name, dimens to
+    # their value. The data file is the same JSON the rebrand reads.
+    json_path = _find_2k_json()
+    if json_path is None:
+        print("SPLIT_2K_JSON_MISSING: split-restores-2k.json not found")
+        return 1
+    with open(json_path, "r", encoding="utf-8") as fh:
+        data2k = json.load(fh)
+    restore2k_draw = {}
+    for rid_s, name in sorted(data2k.get("drawables", {}).items()):
+        rid = int(rid_s, 16)
+        got = resolve(entries, main_sp, 0x08, rid & 0xFFFF)
+        restore2k_draw[rid] = (name, got)
+        print(f"2k restore drawable {rid_s} {name} -> {got!r}")
+    restore2k_stub = {}
+    for rid_s, name in sorted(data2k.get("xml_stubs", {}).items()):
+        rid = int(rid_s, 16)
+        got = resolve(entries, main_sp, 0x08, rid & 0xFFFF)
+        restore2k_stub[rid] = (name, got)
+        print(f"2k restore xml stub {rid_s} {name} -> {got!r}")
+    restore2k_dim = {}
+    for rid_s, (name, want_s) in sorted(data2k.get("dimens", {}).items()):
+        rid = int(rid_s, 16)
+        e = entries.get((0x07, rid & 0xFFFF))
+        got = (decode_dimension(e[3])
+               if e is not None and e[2] == 0x05 else None)
+        m = re.match(r"^([0-9.]+)(px|dp|sp|pt|in|mm)$", want_s)
+        want = (float(m.group(1)), m.group(2)) if m else None
+        restore2k_dim[rid] = (name, got, want)
+        print(f"2k restore dimen {rid_s} {name} -> {got!r} "
+              f"(expected {want!r})")
+
     failures = []
     if main_layout is None or not main_layout.startswith("L|"):
         failures.append(
@@ -349,6 +415,28 @@ def main():
                 f"({name}) resolves to {got!r}, expected "
                 f"{want!r} — a bundled layout calls getText() on "
                 "this id at inflation"
+            )
+    for rid, (name, got) in restore2k_draw.items():
+        if not got or name not in got:
+            failures.append(
+                f"SPLIT_2K_WRONG: drawable 0x{rid:08x} ({name}) "
+                f"resolves to {got!r} — an XML drawable that "
+                "references this id cannot load and the app dies "
+                "with NotFoundException when it is inflated"
+            )
+    for rid, (name, got) in restore2k_stub.items():
+        if not got or name not in got:
+            failures.append(
+                f"SPLIT_2K_WRONG: xml stub 0x{rid:08x} ({name}) "
+                f"resolves to {got!r} — a layer-list that "
+                "references this id cannot load"
+            )
+    for rid, (name, got, want) in restore2k_dim.items():
+        if got is None or got != want:
+            failures.append(
+                f"SPLIT_2K_WRONG: dimen 0x{rid:08x} ({name}) is "
+                f"{got!r}, expected {want!r} — a shape or "
+                "layer-list that references this id cannot load"
             )
     if failures:
         for f in failures:
