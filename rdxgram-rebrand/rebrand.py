@@ -13,7 +13,12 @@ What it does (only these, nothing else):
      values*/layouts.xml; 2e. prune dangling <public> entries for
      file-based types with no file on disk; 2f. prune dangling
      @layout refs inside values*/styles.xml (run 43155415001 failed
-     exactly on those 10 layouts). 2g. launcher label, literal
+     exactly on those 10 layouts); 2h. prune dangling @layout refs
+     inside res/layout*/menu*/xml* files (<include> elements and
+     *layout attributes) and <item>@layout</item> in other values
+     XMLs (the run after 2f failed exactly on 18 such layouts from
+     3 layout files — aapt2 reports only the first ~20 errors, so
+     each fix reveals the next batch). 2g. launcher label, literal
      "Rdx gram" in the manifest (see below).
   3. Label string value in every res/values*/strings.xml: IG 451 has
      NO app_name string — the label is a shrunk string whose public.xml
@@ -354,6 +359,92 @@ def main():
                 % (os.path.relpath(sx, decoded), len(removed_styles),
                    ", ".join(sorted(set(removed_styles))))
             )
+
+    # 2h. Prune dangling @layout references in layout/menu/xml resource
+    # files. The aapt2 link in the run right after 2f was added failed
+    # on exactly these (18 unique layouts, e.g. action_bar,
+    # bottom_sheet_container, the layout_tagging_* set) referenced from
+    # res/layout/*.xml — aapt2 reports only the first ~20 errors, so
+    # each fix reveals the next batch (2d -> 2e -> 2f -> this one).
+    # Same rule as 2f: a layout with no file on disk and no kept
+    # @-reference in layouts.xml cannot be inflated by any live code
+    # path in the stock app either, so removing the reference is safe
+    # (far safer than a stub: a stub would render as a blank view or a
+    # cast crash if any path ever inflates it).
+    #  - values XMLs other than layouts.xml: drop <item>@layout/X</item>
+    #    where X is missing (2f did this only for styles.xml).
+    #  - layout/menu/xml files: drop a whole <include layout="@layout/X">
+    #    element where X is missing, and drop any *layout="@layout/X"
+    #    attribute where X is missing (ViewStub / fragment /
+    #    preference android:layout / widgetLayout / actionLayout).
+    import glob as _glob4
+    dangling_layouts_2h = set()
+    item_re_2h = re.compile(
+        r'<item\s+name="([^"]+)"[^>]*>\s*@layout/([A-Za-z0-9_]+)\s*</item>'
+    )
+    for vx in sorted(_glob4.glob(os.path.join(decoded, "res", "values*", "*.xml"))):
+        if os.path.basename(vx) == "layouts.xml":
+            continue
+        with open(vx, "r", encoding="utf-8") as fh:
+            vcontent = fh.read()
+        removed_v = []
+        def _fix_v(m):
+            if m.group(2) in existing_layouts:
+                return m.group(0)
+            removed_v.append(m.group(2))
+            return ""
+        new_v = item_re_2h.sub(_fix_v, vcontent)
+        if removed_v:
+            with open(vx, "w", encoding="utf-8") as fh:
+                fh.write(new_v)
+            dangling_layouts_2h.update(removed_v)
+            changes.append(
+                "values sanitize %s: removed %d dangling @layout items (%s)"
+                % (os.path.relpath(vx, decoded), len(removed_v),
+                   ", ".join(sorted(set(removed_v))))
+            )
+    include_re_2h = re.compile(
+        r'<include\b[^>]*?(?:/>|>.*?</include>)', re.DOTALL
+    )
+    layout_attr_re_2h = re.compile(
+        r'([\s][\w:]*(?:[Ll]ayout))="@layout/([A-Za-z0-9_]+)"'
+    )
+    for sub in ("layout", "menu", "xml"):
+        for _f in sorted(_glob4.glob(os.path.join(decoded, "res", sub + "*", "*.xml"))):
+            with open(_f, "r", encoding="utf-8") as fh:
+                content = fh.read()
+            removed_inc = []
+            def _fix_inc(m):
+                tag = m.group(0)
+                lm = re.search(r'layout="@layout/([A-Za-z0-9_]+)"', tag.split(">", 1)[0])
+                if lm is None:
+                    return tag
+                if lm.group(1) in existing_layouts:
+                    return tag
+                removed_inc.append(lm.group(1))
+                return ""
+            content = include_re_2h.sub(_fix_inc, content)
+            removed_attr = []
+            def _fix_attr(m):
+                if m.group(2) in existing_layouts:
+                    return m.group(0)
+                removed_attr.append(m.group(2))
+                return ""
+            content = layout_attr_re_2h.sub(_fix_attr, content)
+            gone = sorted(set(removed_inc + removed_attr))
+            if gone:
+                with open(_f, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                dangling_layouts_2h.update(gone)
+                changes.append(
+                    "layout sanitize %s: removed %d dangling @layout ref(s) (%s)"
+                    % (os.path.relpath(_f, decoded), len(gone), ", ".join(gone))
+                )
+    if dangling_layouts_2h:
+        changes.append(
+            "2h total: %d distinct dangling layout names pruned from resource XMLs"
+            % len(dangling_layouts_2h)
+        )
 
     # 3. Label string value in every values*/strings.xml
     # (belt-and-suspenders for the literal manifest labels of 2g):
