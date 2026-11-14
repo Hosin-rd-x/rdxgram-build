@@ -40,8 +40,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # NOTE: no android-actions/setup-android step on purpose. v3 with no
+      # inputs runs `sdkmanager tools`, and the current SDK repository has
+      # no package named `tools` ("Failed to find package 'tools'", exit 1
+      # — run 43586251937). The ubuntu-latest runner already ships a full
+      # Android SDK (ANDROID_HOME=/usr/local/lib/android/sdk, cmdline-tools
+      # 20.0), which android-emulator-runner uses directly.
 
       - name: Install APK on emulator and watch it launch
         uses: reactivecircus/android-emulator-runner@v2
