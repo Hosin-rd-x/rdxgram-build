@@ -21,21 +21,31 @@
 # Secrets (same as instaeclipse.yml):
 #   - TESTKEY_P12_B64 / TESTKEY_PASSWORD (testkey keystore, never in logs)
 #
-# Output: Instagram-451.0.0.53.80-RdxGram-Theme-1.0-testkey.apk
+# Output: Instagram-451.0.0.53.80-RdxGram-Theme-<version>-testkey.apk
 #   (package com.instagram.android, testkey-signed, RdxGram Theme module
 #   embedded under assets/lspatch/modules/ir.rdx.gram.theme.apk).
+# Since theme 1.1 the patched APK also has requiredSplitTypes stripped
+# from its manifest (see .github/scripts/strip_required_splits.py) so it
+# installs standalone on a clean device — the Play-bundle density split
+# is not inside the single APK (INSTALL_FAILED_MISSING_SPLIT, emulator
+# run 43588589307). The APK is zipaligned + re-signed after stripping.
 #   The font and the bar themselves are verified only by the phone test —
 #   this workflow verifies the module IS the theme module (classes +
 #   font asset + xposed entries present) and the APK is well-formed
 #   and signed.
 #
-# Also uploads the standalone module APK (rdxgram-theme-1.0.apk) so the
+# Also uploads the standalone module APK (rdxgram-theme-<version>.apk) so the
 # settings app can be installed for the on/off switches.
 
 name: Build Instagram + RdxGram Theme (LSPatch)
 
 on:
   workflow_dispatch:
+    inputs:
+      theme_version:
+        description: "Theme release version (used in APK and release names)"
+        required: true
+        default: "1.1"
 
 permissions:
   contents: read
@@ -77,13 +87,13 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:assembleDebug --no-daemon
           ls -la app/build/outputs/apk/debug/
-          cp app/build/outputs/apk/debug/app-debug.apk ../rdxgram-theme-1.0.apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../rdxgram-theme-${{ inputs.theme_version }}.apk
           cd ..
-          ls -la rdxgram-theme-1.0.apk
-          sha256sum rdxgram-theme-1.0.apk
-          "$BT/aapt" dump badging rdxgram-theme-1.0.apk | head -2
-          "$BT/aapt" dump badging rdxgram-theme-1.0.apk | grep -q "package: name='ir.rdx.gram.theme'"
-          echo "MODULE_APK=rdxgram-theme-1.0.apk" >> "$GITHUB_ENV"
+          ls -la rdxgram-theme-${{ inputs.theme_version }}.apk
+          sha256sum rdxgram-theme-${{ inputs.theme_version }}.apk
+          "$BT/aapt" dump badging rdxgram-theme-${{ inputs.theme_version }}.apk | head -2
+          "$BT/aapt" dump badging rdxgram-theme-${{ inputs.theme_version }}.apk | grep -q "package: name='ir.rdx.gram.theme'"
+          echo "MODULE_APK=rdxgram-theme-${{ inputs.theme_version }}.apk" >> "$GITHUB_ENV"
 
       - name: Verify theme module contents
         run: |
@@ -176,15 +186,16 @@ jobs:
         run: |
           PATCHED="$(ls out/*-lspatched.apk | head -1)"
           test -n "$PATCHED"
-          cp "$PATCHED" "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk"
-          ls -la "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk"
-          "$BT/aapt" dump badging "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" | head -3
-          "$BT/aapt" dump badging "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" | grep -q "package: name='com.instagram.android'"
-          "$BT/apksigner" verify --verbose --print-certs "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk"
+          cp "$PATCHED" "Instagram-${VERSION_NAME}-RdxGram-Theme-${{ inputs.theme_version }}-testkey.apk"
+          echo "PATCHED_APK=Instagram-${VERSION_NAME}-RdxGram-Theme-${{ inputs.theme_version }}-testkey.apk" >> "$GITHUB_ENV"
+          ls -la "$PATCHED_APK"
+          "$BT/aapt" dump badging "$PATCHED_APK" | head -3
+          "$BT/aapt" dump badging "$PATCHED_APK" | grep -q "package: name='com.instagram.android'"
+          "$BT/apksigner" verify --verbose --print-certs "$PATCHED_APK"
           echo "--- embedded module ---"
-          unzip -l "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" | grep -i "lspatch/modules" || (echo "MODULE_NOT_EMBEDDED" && exit 1)
+          unzip -l "$PATCHED_APK" | grep -i "lspatch/modules" || (echo "MODULE_NOT_EMBEDDED" && exit 1)
           mkdir -p embedded-check
-          unzip -o -j "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" "assets/lspatch/modules/*" -d embedded-check
+          unzip -o -j "$PATCHED_APK" "assets/lspatch/modules/*" -d embedded-check
           EMBEDDED="$(ls embedded-check/*.apk | head -1)"
           test -n "$EMBEDDED"
           "$BT/aapt" dump badging "$EMBEDDED" | grep -q "package: name='ir.rdx.gram.theme'" || (echo "EMBEDDED_PACKAGE_MISMATCH" && exit 1)
@@ -194,11 +205,43 @@ jobs:
           unzip -p "$EMBEDDED" "assets/fonts/Inter-Variable.ttf" > /tmp/inter-embedded.ttf
           test "$(sha256sum /tmp/inter-embedded.ttf | cut -d' ' -f1)" = "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031" || (echo "EMBEDDED_FONT_SHA_MISMATCH" && exit 1)
           echo "embedded module verified: theme module + Inter font inside the final APK"
-          echo "--- zipalign (report only) ---"
-          "$BT/zipalign" -c -v 4 "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" || echo "ZIPALIGN_NOT_ALIGNED (install still works)"
-          echo "--- SHA-256 ---"
-          sha256sum "Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk"
-          echo "PATCHED_APK=Instagram-${VERSION_NAME}-RdxGram-Theme-1.0-testkey.apk" >> "$GITHUB_ENV"
+          echo "--- zipalign (report only; real align happens after the strip step) ---"
+          "$BT/zipalign" -c -v 4 "$PATCHED_APK" || echo "ZIPALIGN_NOT_ALIGNED (install still works)"
+          echo "--- SHA-256 (pre-strip) ---"
+          sha256sum "$PATCHED_APK"
+
+      - name: Strip requiredSplitTypes + re-sign (standalone install)
+        if: env.HAS_LIBS == 'true'
+        env:
+          TESTKEY_P12_B64: ${{ secrets.TESTKEY_P12_B64 }}
+          TESTKEY_PASSWORD: ${{ secrets.TESTKEY_PASSWORD }}
+        run: |
+          # Stock Instagram 451 is a Play-bundle build: its manifest
+          # declares requiredSplitTypes='base__density', and the density
+          # config split is not inside the single base APK — so the APK
+          # refuses to install on a clean device (INSTALL_FAILED_MISSING_SPLIT,
+          # seen in emulator run 43588589307). Remove that one attribute
+          # from the binary manifest (the base APK carries the default
+          # resources, so Android falls back to them), then zipalign and
+          # re-sign with the same testkey. The emulator test on the new
+          # release is the final judge of whether it runs.
+          python3 .github/scripts/strip_required_splits.py "$PATCHED_APK" stripped.apk
+          test -s stripped.apk
+          mv stripped.apk "$PATCHED_APK"
+          python3 .github/scripts/strip_required_splits.py --check "$PATCHED_APK"
+          "$BT/zipalign" -f 4 "$PATCHED_APK" aligned.apk
+          mv aligned.apk "$PATCHED_APK"
+          test -n "$TESTKEY_P12_B64"
+          test -n "$TESTKEY_PASSWORD"
+          echo "$TESTKEY_P12_B64" | base64 -d > testkey.p12
+          "$BT/apksigner" sign --ks testkey.p12 --ks-pass "pass:$TESTKEY_PASSWORD" --key-pass "pass:$TESTKEY_PASSWORD" --ks-key-alias testkey "$PATCHED_APK"
+          rm -f testkey.p12
+          "$BT/apksigner" verify --verbose --print-certs "$PATCHED_APK"
+          "$BT/aapt" dump badging "$PATCHED_APK" | head -3
+          "$BT/aapt" dump badging "$PATCHED_APK" | grep -q "package: name='com.instagram.android'"
+          echo "--- SHA-256 (final) ---"
+          sha256sum "$PATCHED_APK"
+          echo "FINAL_APK=$PATCHED_APK" >> "$GITHUB_ENV"
 
       - name: Upload APKs
         if: env.HAS_LIBS == 'true'
@@ -206,8 +249,8 @@ jobs:
         with:
           name: instagram-rdxgram-theme
           path: |
-            Instagram-*-RdxGram-Theme-1.0-testkey.apk
-            rdxgram-theme-1.0.apk
+            Instagram-*-RdxGram-Theme-${{ inputs.theme_version }}-testkey.apk
+            rdxgram-theme-${{ inputs.theme_version }}.apk
             lspatch.log
             download.log
           if-no-files-found: error
