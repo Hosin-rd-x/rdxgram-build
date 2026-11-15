@@ -294,54 +294,55 @@ jobs:
               adb pull /sdcard/ui1.xml ui1.xml 2>&1 | tail -1 || echo "UI1_PULL_FAILED" | tee -a timing.txt
               TAP_START=$(date +%s)
               echo "tap_start_epoch=$TAP_START" >> timing.txt
-              python3 - <<'PY' > tap.txt 2>&1 || echo "TAP_PARSE_FAILED" >> tap.txt
-          import re, sys
-          try:
-            xml = open("ui1.xml", encoding="utf-8", errors="replace").read()
-          except OSError as e:
-            print("NO_UI1_XML", e); sys.exit(0)
-          # list every node with text so the screen is visible even if no match
-          nodes = re.findall(r'<node[^>]*>', xml)
-          print(f"nodes={len(nodes)}")
-          for n in nodes:
-            t = re.search(r'text="([^"]*)"', n)
-            d = re.search(r'content-desc="([^"]*)"', n)
-            c = re.search(r'clickable="(true|false)"', n)
-            b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-            cls = re.search(r'class="([^"]*)"', n)
-            if (t and t.group(1)) or (d and d.group(1)):
-              print(f"  clickable={c.group(1) if c else '?'} class={cls.group(1) if cls else '?'} text={t.group(1) if t else ''!r} desc={d.group(1) if d else ''!r} bounds={b.groups() if b else None}")
-          # signed-out landing: no "Log in" button; login entry is "I already have a profile"
-          TARGETS = ["I already have a profile", "Log in"]
-          for want in TARGETS:
-            best = None
-            for n in nodes:
-              t = re.search(r'text="([^"]*)"', n)
-              c = re.search(r'clickable="([^"]*)"', n)
-              b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-              if t and t.group(1) == want and b:
-                if c and c.group(1) == "true":
-                  best = b; break
-                if best is None:
-                  best = b
-            if best is not None:
-              x1, y1, x2, y2 = map(int, best.groups())
-              print(f"TARGET {want!r}")
-              print(f"TAP {(x1+x2)//2} {(y1+y2)//2}")
-              break
-          else:
-            print("NO_LOGIN_BUTTON_FOUND")
-          PY
+              python3 .github/scripts/tap_parse.py ui1.xml "I already have a profile,Log in" > tap.txt 2>&1 || echo "TAP_PARSE_FAILED" >> tap.txt
               cat tap.txt
               TAPXY=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap.txt | head -1 || true)
               if [ -n "$TAPXY" ]; then
                 set -- $TAPXY
-                echo "tapping Log in at $2 $3" | tee -a timing.txt
+                echo "tapping first target at $2 $3" | tee -a timing.txt
                 adb shell input tap "$2" "$3" || echo "TAP_FAILED" | tee -a timing.txt
+                sleep 3
+                # If a login form is now showing, fill dummy credentials so the
+                # submit actually runs the login attempt (empty-form submit
+                # only shows inline validation and never reaches the crash
+                # Hossein reported). Dummy creds cannot authenticate.
+                adb shell uiautomator dump /sdcard/ui1b.xml 2>&1 | tee -a timing.txt || echo "UIA_DUMP1B_FAILED" | tee -a timing.txt
+                adb pull /sdcard/ui1b.xml ui1b.xml 2>&1 | tail -1 || echo "UI1B_PULL_FAILED" | tee -a timing.txt
+                python3 .github/scripts/tap_parse.py ui1b.xml "Log in" > tap1b.txt 2>&1 || echo "TAP1B_PARSE_FAILED" >> tap1b.txt
+                cat tap1b.txt
+                FILLU=$(grep -oE '^FILL_USER [0-9]+ [0-9]+$' tap1b.txt | head -1 || true)
+                FILLP=$(grep -oE '^FILL_PASS [0-9]+ [0-9]+$' tap1b.txt | head -1 || true)
+                if [ -n "$FILLU" ]; then
+                  set -- $FILLU
+                  adb shell input tap "$2" "$3" || true; sleep 1
+                  adb shell input text testuser123 || true; sleep 1
+                  echo "filled dummy username" | tee -a timing.txt
+                fi
+                if [ -n "$FILLP" ]; then
+                  set -- $FILLP
+                  adb shell input tap "$2" "$3" || true; sleep 1
+                  adb shell input text testpass123 || true; sleep 1
+                  echo "filled dummy password" | tee -a timing.txt
+                fi
+                adb shell input keyevent 111 || true
+                sleep 1
+                # re-dump: the keyboard may have shifted the layout
+                adb shell uiautomator dump /sdcard/ui1c.xml 2>&1 | tee -a timing.txt || echo "UIA_DUMP1C_FAILED" | tee -a timing.txt
+                adb pull /sdcard/ui1c.xml ui1c.xml 2>&1 | tail -1 || echo "UI1C_PULL_FAILED" | tee -a timing.txt
+                python3 .github/scripts/tap_parse.py ui1c.xml "Log in" > tap1c.txt 2>&1 || echo "TAP1C_PARSE_FAILED" >> tap1c.txt
+                cat tap1c.txt
+                TAPXY=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap1c.txt | head -1 || grep -oE '^TAP [0-9]+ [0-9]+$' tap1b.txt | head -1 || true)
+                if [ -n "$TAPXY" ]; then
+                  set -- $TAPXY
+                  echo "tapping Log in (submit) at $2 $3" | tee -a timing.txt
+                  adb shell input tap "$2" "$3" || echo "TAP_SUBMIT_FAILED" | tee -a timing.txt
+                else
+                  echo "no Log in button to submit (see ui1b/ui1c)" | tee -a timing.txt
+                fi
               else
-                echo "no Log in button to tap (see ui1.xml / tap.txt)" | tee -a timing.txt
+                echo "no first target to tap (see ui1.xml / tap.txt)" | tee -a timing.txt
               fi
-              sleep 20
+              sleep 25
               TAP_END=$(date +%s)
               echo "tap_end_epoch=$TAP_END tap_to_result_seconds=$((TAP_END - TAP_START))" >> timing.txt
               adb shell pidof "$PKG" > pid2.txt 2>&1 || echo "not-running" > pid2.txt
@@ -354,43 +355,8 @@ jobs:
                 echo "CRASHED_AFTER_LOGIN_TAP" | tee -a status.txt
               elif [ "$(cat pid2.txt)" != "not-running" ]; then
                 echo "ALIVE_AFTER_LOGIN_TAP" | tee -a status.txt
-                # If a login form is now showing, tap its Log in button too (empty submit).
-                python3 - <<'PY' > tap2.txt 2>&1 || echo "TAP2_PARSE_FAILED" >> tap2.txt
-          import re, sys
-          try:
-            xml = open("ui2.xml", encoding="utf-8", errors="replace").read()
-          except OSError as e:
-            print("NO_UI2_XML", e); sys.exit(0)
-          nodes = re.findall(r'<node[^>]*>', xml)
-          print(f"nodes={len(nodes)}")
-          for n in nodes:
-            t = re.search(r'text="([^"]*)"', n)
-            d = re.search(r'content-desc="([^"]*)"', n)
-            c = re.search(r'clickable="(true|false)"', n)
-            b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-            cls = re.search(r'class="([^"]*)"', n)
-            if (t and t.group(1)) or (d and d.group(1)):
-              print(f"  clickable={c.group(1) if c else '?'} class={cls.group(1) if cls else '?'} text={t.group(1) if t else ''!r} desc={d.group(1) if d else ''!r} bounds={b.groups() if b else None}")
-          TARGETS = ["Log in", "Next"]
-          for want in TARGETS:
-            best = None
-            for n in nodes:
-              t = re.search(r'text="([^"]*)"', n)
-              c = re.search(r'clickable="([^"]*)"', n)
-              b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-              if t and t.group(1) == want and b:
-                if c and c.group(1) == "true":
-                  best = b; break
-                if best is None:
-                  best = b
-            if best is not None:
-              x1, y1, x2, y2 = map(int, best.groups())
-              print(f"TARGET {want!r}")
-              print(f"TAP {(x1+x2)//2} {(y1+y2)//2}")
-              break
-          else:
-            print("NO_FORM_LOGIN_BUTTON")
-          PY
+                # If a login form is still showing, tap its Log in button once more.
+                python3 .github/scripts/tap_parse.py ui2.xml "Log in" > tap2.txt 2>&1 || echo "TAP2_PARSE_FAILED" >> tap2.txt
                 cat tap2.txt
                 TAP2=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap2.txt | head -1 || true)
                 if [ -n "$TAP2" ]; then
@@ -432,8 +398,12 @@ jobs:
             launch.txt
             timing.txt
             tap.txt
+            tap1b.txt
+            tap1c.txt
             tap2.txt
             ui1.xml
+            ui1b.xml
+            ui1c.xml
             ui2.xml
             logcat2.txt
             crash2.txt
