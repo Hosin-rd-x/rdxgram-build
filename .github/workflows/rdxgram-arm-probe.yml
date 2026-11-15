@@ -33,6 +33,10 @@ on:
         description: "Release tag of the already-built APK to test"
         required: true
         default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.4"
+      apk_url:
+        description: "Direct APK URL (overrides apk_tag; used for baseline APKs not in a release, e.g. stock InstaPro)"
+        required: false
+        default: ""
       tap_login:
         description: "Tap the Log in button after launch and capture a second logcat (true/false)"
         required: false
@@ -101,7 +105,12 @@ jobs:
         run: |
           if ! command -v gh >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y gh; fi
           mkdir -p apk
-          gh release download "${{ inputs.apk_tag }}" -p '*nstagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk
+          if [ -n "${{ inputs.apk_url }}" ]; then
+            echo "downloading APK from URL: ${{ inputs.apk_url }}"
+            curl -L --fail -o apk/Instagram-baseline-439.apk "${{ inputs.apk_url }}"
+          else
+            gh release download "${{ inputs.apk_tag }}" -p '*nstagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk
+          fi
           ls -la apk
           sha256sum apk/*.apk
 
