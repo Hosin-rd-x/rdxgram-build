@@ -674,8 +674,55 @@ def main():
                 log("username text did not land; retrying once")
                 clear_field(user_field["center"])
                 type_text(USER)
+            # Focus bug (run 43754171807): the password was typed into the
+            # still-focused username field because the tap on the password
+            # field used STALE coordinates from the pre-typing dump and was
+            # never verified. Re-find the password field from a FRESH dump,
+            # tap it, and confirm it is focused before typing.
+            nodes_fresh = parse_dump(dump(f"step{step:02d}p"))
+            pass_field = find_edit(nodes_fresh, "Password") or (
+                edits(nodes_fresh)[1] if len(edits(nodes_fresh)) > 1 else None)
+            if not pass_field:
+                return finish("STUCK_LOGIN_FORM",
+                              "password field vanished after typing username")
             tap(*pass_field["center"])
+            time.sleep(1)
+            nodes_foc = parse_dump(dump(f"step{step:02d}f"))
+            pf = find_edit(nodes_foc, "Password") or (
+                edits(nodes_foc)[1] if len(edits(nodes_foc)) > 1 else None)
+            if pf and pf.get("focused") != "true":
+                log("password field not focused after tap; tapping again")
+                tap(*pf["center"])
+                time.sleep(1)
             type_text(PASS)
+            # Regression check: the username field must still be EXACTLY the
+            # username — if the password leaked into it, it would read
+            # USER+PASS (seen in run 43754171807). Field values are never
+            # logged; only the equality result is used.
+            nodes_ver = parse_dump(dump(f"step{step:02d}v"))
+            uf = find_edit(nodes_ver, "Username") or (
+                edits(nodes_ver)[0] if edits(nodes_ver) else None)
+            if uf and uf["text"] != USER:
+                log("username field changed after password typing; "
+                    "refilling both fields once")
+                clear_field(uf["center"])
+                type_text(USER)
+                nodes_r = parse_dump(dump(f"step{step:02d}r"))
+                pf2 = find_edit(nodes_r, "Password") or (
+                    edits(nodes_r)[1] if len(edits(nodes_r)) > 1 else None)
+                if not pf2:
+                    return finish("STUCK_LOGIN_FORM",
+                                  "password field missing on refill")
+                tap(*pf2["center"])
+                time.sleep(1)
+                type_text(PASS)
+                nodes_ver2 = parse_dump(dump(f"step{step:02d}v2"))
+                uf2 = find_edit(nodes_ver2, "Username") or (
+                    edits(nodes_ver2)[0] if edits(nodes_ver2) else None)
+                if uf2 and uf2["text"] != USER:
+                    return finish("LOGIN_NO_ADVANCE",
+                                  "username field corrupted twice while "
+                                  "typing password; aborting before submit")
             log("username and password filled; hiding keyboard")
             dismiss_keyboard()
             time.sleep(1)
