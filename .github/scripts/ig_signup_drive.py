@@ -79,6 +79,27 @@ def dismiss_keyboard():
     keyevent(111)  # KEYCODE_ESCAPE
 
 
+def maybe_hide_keyboard(nodes):
+    """If an EditText is focused the soft keyboard is up and it covers the
+    lower buttons: a tap meant for a button lands on a keyboard key
+    instead (seen in run 43679452461: 58 taps on 'Sign up with email'
+    typed 58 '2's into the phone field). Hide it with BACK (which only
+    dismisses the keyboard while one is shown) and re-dump.
+    Returns fresh nodes (or the original ones if nothing was hidden)."""
+    focused = [n for n in nodes
+               if n["cls"].endswith("EditText")
+               and n.get("focused") == "true"]
+    # parse_dump drops the focused attr; re-check via a fresh attribute read
+    if not focused:
+        return nodes, False
+    log("keyboard is up (focused field); hiding it with BACK")
+    keyevent(4)
+    time.sleep(1.5)
+    path = dump(f"step{STATUS['steps']:02d}k")
+    fresh = parse_dump(path)
+    return fresh, True
+
+
 def type_text(s):
     # spaces must be %s for `input text`; other chars go through as-is
     arg = s.replace(" ", "%s")
@@ -132,6 +153,7 @@ def parse_dump(path):
             "bounds": b,
             "center": center,
             "resource": n.get("resource-id") or "",
+            "focused": n.get("focused") or "",
         })
     return nodes
 
@@ -366,6 +388,9 @@ def main():
     code_done = False
     username_tried = []
     stuck = {}
+    last_state = None
+    same_state_runs = 0
+    kb_hidden_for = None  # state for which the keyboard was already hidden
 
     for step in range(1, 61):
         STATUS["steps"] = step
@@ -374,7 +399,31 @@ def main():
         path = dump(f"step{step:02d}")
         nodes = parse_dump(path)
         state = classify(nodes)
+        # A focused field means the soft keyboard is up and covers the
+        # lower buttons: hide it once per screen visit before any button
+        # tap, then re-classify. (Hiding twice would send a real BACK.)
+        if state in ("PHONE_OR_EMAIL", "EMAIL", "PASSWORD", "NAME",
+                     "USERNAME", "CODE", "BIRTHDAY", "LOGIN_FORM",
+                     "PHOTO", "SAVE_LOGIN", "FIND_PEOPLE", "INTERSTITIAL"):
+            if kb_hidden_for != state:
+                nodes, hid = maybe_hide_keyboard(nodes)
+                if hid:
+                    kb_hidden_for = state
+                    state = classify(nodes)
+        if state != last_state and kb_hidden_for != state:
+            kb_hidden_for = None
         STATUS["last_screen"] = state
+        # Stuck detection: same state 6 times in a row = no progress.
+        if state == last_state:
+            same_state_runs += 1
+        else:
+            last_state = state
+            same_state_runs = 1
+        if same_state_runs >= 6:
+            screenshot(f"shot_stuck_{state.lower()}")
+            return finish(f"STUCK_{state}",
+                          f"same screen {same_state_runs} steps in a row "
+                          f"with no progress")
         log(f"step {step}: screen={state} "
             f"texts={all_text(nodes)[:300]!r}")
         save_status()
@@ -439,8 +488,9 @@ def main():
             node = find(nodes, "Sign up with email",
                         "Sign up with email address")
             if node:
+                log(f"tapping 'Sign up with email' at {node['center']}")
                 tap(*node["center"])
-                time.sleep(3)
+                time.sleep(4)
                 continue
             return finish("STUCK_PHONE",
                           "phone screen has no email-signup link")
