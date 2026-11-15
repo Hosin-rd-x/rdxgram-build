@@ -329,7 +329,21 @@ jobs:
                 fi
                 if [ -n "$FILLP" ]; then
                   set -- $FILLP
+                  # Focus check (same quirk fixed in ig_login_drive.py,
+                  # commit 430e2e19): tapping the password field does not
+                  # always move focus off the username field, so typing
+                  # then appends the password to the username and the
+                  # submit never runs (seen in the 1.8 fake probe:
+                  # username became "testuser123testpass123"). Dump,
+                  # verify the password field is focused, re-tap once
+                  # if it is not.
                   adb shell input tap "$2" "$3" || true; sleep 1
+                  adb shell uiautomator dump /sdcard/ui1b2.xml 2>&1 | tee -a timing.txt || true
+                  adb pull /sdcard/ui1b2.xml ui1b2.xml 2>&1 | tail -1 || true
+                  if ! python3 -c "import sys, xml.etree.ElementTree as ET; t = ET.parse('ui1b2.xml'); sys.exit(0 if any(n.get('content-desc','').startswith('Password,') and n.get('focused')=='true' for n in t.iter()) else 1)"; then
+                    echo "password field not focused after first tap — re-tapping" | tee -a timing.txt
+                    adb shell input tap "$2" "$3" || true; sleep 1
+                  fi
                   adb shell input text testpass123 || true; sleep 1
                   echo "filled dummy password" | tee -a timing.txt
                 fi
@@ -338,7 +352,32 @@ jobs:
                 # re-dump: the keyboard may have shifted the layout
                 adb shell uiautomator dump /sdcard/ui1c.xml 2>&1 | tee -a timing.txt || echo "UIA_DUMP1C_FAILED" | tee -a timing.txt
                 adb pull /sdcard/ui1c.xml ui1c.xml 2>&1 | tail -1 || echo "UI1C_PULL_FAILED" | tee -a timing.txt
-                python3 .github/scripts/tap_parse.py ui1c.xml "Log in" > tap1c.txt 2>&1 || echo "TAP1C_PARSE_FAILED" >> tap1c.txt
+                # Regression check: the username field must still hold
+                # exactly the dummy username. If the password leaked
+                # into it, clear both fields and refill once.
+                if ! python3 -c "import sys, xml.etree.ElementTree as ET; t = ET.parse('ui1c.xml'); sys.exit(0 if any((n.get('text') or '')=='testuser123' for n in t.iter() if n.get('content-desc','').startswith('Username,')) else 1)"; then
+                  echo "FILL_REGRESSION: username field changed — refilling once" | tee -a timing.txt
+                  python3 .github/scripts/tap_parse.py ui1c.xml "Log in" > tap1c0.txt 2>&1 || true
+                  FU2=$(grep -oE '^FILL_USER [0-9]+ [0-9]+$' tap1c0.txt | head -1 || true)
+                  FP2=$(grep -oE '^FILL_PASS [0-9]+ [0-9]+$' tap1c0.txt | head -1 || true)
+                  if [ -n "$FU2" ]; then
+                    set -- $FU2
+                    adb shell input tap "$2" "$3" || true; sleep 1
+                    adb shell input keyevent 113 || true; sleep 1
+                    adb shell input text testuser123 || true; sleep 1
+                  fi
+                  if [ -n "$FP2" ]; then
+                    set -- $FP2
+                    adb shell input tap "$2" "$3" || true; sleep 1
+                    adb shell input keyevent 113 || true; sleep 1
+                    adb shell input text testpass123 || true; sleep 1
+                  fi
+                  adb shell uiautomator dump /sdcard/ui1c2.xml 2>&1 | tee -a timing.txt || true
+                  adb pull /sdcard/ui1c2.xml ui1c2.xml 2>&1 | tail -1 || true
+                  python3 .github/scripts/tap_parse.py ui1c2.xml "Log in" > tap1c.txt 2>&1 || echo "TAP1C_PARSE_FAILED" >> tap1c.txt
+                else
+                  python3 .github/scripts/tap_parse.py ui1c.xml "Log in" > tap1c.txt 2>&1 || echo "TAP1C_PARSE_FAILED" >> tap1c.txt
+                fi
                 cat tap1c.txt
                 TAPXY=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap1c.txt | head -1 || grep -oE '^TAP [0-9]+ [0-9]+$' tap1b.txt | head -1 || true)
                 if [ -n "$TAPXY" ]; then
