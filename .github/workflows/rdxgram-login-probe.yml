@@ -1,0 +1,325 @@
+# RdxGram login probe — log in with a REAL Instagram account inside the
+# app on Redroid (ARM runner) and reach the home feed.
+#
+# Why: the login-tap crash on Hossein's phone never reproduced with fake
+# credentials; only a real account reaches the post-login screens. This run
+# uses Hossein's own account (username + password from repo secrets
+# IG_LOGIN_USER / IG_LOGIN_PASS, temporary, deleted after the run).
+# The driver attempts ONE login submit. If the password is wrong it stops
+# at WRONG_PASSWORD; if Instagram asks for a verification code it stops
+# at CODE_REQUIRED and reports the masked destination — it never retries
+# the password and never guesses a code.
+#
+# Trigger: manual only (workflow_dispatch). Input apk_tag defaults to the
+# release under test (RdxGram side-by-side 1.5). Credentials come from
+# repo secrets and are never printed: the driver logs only masked events.
+#
+# The boot/install/launch steps are the same as rdxgram-signup-probe.yml,
+# WITHOUT the tap-login phase (dummy credentials must not run before the
+# real login attempt). The login driver (.github/scripts/ig_login_drive.py)
+# runs after launch and drives the login flow by UI dumps. Verdicts live in
+# status.json / status.txt.
+#
+name: RdxGram login probe (own account)
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_tag:
+        description: "Release tag of the already-built APK to test"
+        required: true
+        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.5"
+      apk_url:
+        description: "Direct APK URL (overrides apk_tag)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  arm-probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Check out probe workflow + scripts
+        uses: actions/checkout@v4
+
+      - name: Probe binder / ashmem
+        id: binder
+        run: |
+          echo "== kernel =="; uname -a
+          echo "== /dev/binder* =="; ls -l /dev/binder* 2>&1 || true
+          echo "== loaded modules =="; lsmod | grep -E 'binder|ashmem' || echo "no binder/ashmem modules loaded"
+          echo "== modprobe binder_linux =="
+          if sudo modprobe binder_linux 2>&1; then echo "binder_linux modprobe: OK"; else echo "binder_linux modprobe: FAILED"; fi
+          echo "== modprobe ashmem_linux =="
+          if sudo modprobe ashmem_linux 2>&1; then echo "ashmem_linux modprobe: OK"; else echo "ashmem_linux modprobe: FAILED"; fi
+          ls -l /dev/binder* 2>&1 || true
+          if [ ! -e /dev/binder ]; then
+            echo "== binder still missing, trying linux-modules-extra =="
+            sudo apt-get update -qq 2>&1 | tail -2 || true
+            sudo apt-get install -y linux-modules-extra-$(uname -r) 2>&1 | tail -5 || true
+            sudo modprobe binder_linux 2>&1 || true
+            sudo modprobe ashmem_linux 2>&1 || true
+            ls -l /dev/binder* 2>&1 || true
+          fi
+          # The binder module can load yet still create no /dev/binder node
+          # (observed on the 7.0.0-1017-azure kernel). Some kernels only
+          # expose binder through binderfs — try mounting it.
+          if [ ! -e /dev/binder ]; then
+            echo "== binder still missing, trying binderfs mount =="
+            sudo mkdir -p /dev/binderfs
+            sudo mount -t binder binder /dev/binderfs 2>&1 || echo "binderfs mount FAILED"
+            ls -l /dev/binderfs/ 2>&1 || true
+          fi
+          echo "== final module state =="; lsmod | grep -E 'binder|ashmem' || echo "still no binder/ashmem modules"
+          BINDER=no
+          BINDERFS=no
+          if [ -e /dev/binder ]; then BINDER=yes; fi
+          if [ -e /dev/binderfs/binder-control ]; then BINDER=yes; BINDERFS=yes; fi
+          echo "binder_present=$BINDER" >> "$GITHUB_OUTPUT"
+          echo "binderfs_present=$BINDERFS" >> "$GITHUB_OUTPUT"
+          echo "BINDER_PRESENT=$BINDER" > binder.txt
+          echo "BINDERFS_PRESENT=$BINDERFS" >> binder.txt
+          if [ "$BINDER" = "no" ]; then echo "BINDER_MISSING" > status.txt; else echo "BINDER_PRESENT" > status.txt; fi
+          : > logcat.txt
+          : > crash.txt
+          : > pid.txt
+          : > boot-diag.txt
+          : > launch.txt
+          echo "binder_present=$BINDER"
+
+      - name: Download APK to test
+        if: steps.binder.outputs.binder_present == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y gh; fi
+          mkdir -p apk
+          if [ -n "${{ inputs.apk_url }}" ]; then
+            echo "downloading APK from URL: ${{ inputs.apk_url }}"
+            curl -L --fail -o apk/Instagram-baseline-439.apk "${{ inputs.apk_url }}"
+          else
+            gh release download "${{ inputs.apk_tag }}" -p '*nstagram-*.apk' --repo "$GITHUB_REPOSITORY" --dir apk
+          fi
+          ls -la apk
+          sha256sum apk/*.apk
+
+      # Some releases (e.g. the base InstaEclipse APK) still declare
+      # requiredSplitTypes and cannot install on a clean device at all.
+      # If the downloaded APK has it, strip it and re-sign with a throwaway
+      # key (the strip drops the APK Signing Block, so a re-sign is
+      # mandatory — targetSdk 30+ requires a v2 signature). APKs that are
+      # already stripped (theme 1.1, side-by-side) install as downloaded.
+      - name: Strip requiredSplitTypes + re-sign if needed
+        if: steps.binder.outputs.binder_present == 'yes'
+        run: |
+          set -x
+          APK=$(ls apk/*nstagram-*.apk | head -1)
+          echo "downloaded APK: $APK"
+          if python3 .github/scripts/strip_required_splits.py --check "$APK"; then
+            echo "requiredSplitTypes absent, installing as downloaded"
+            echo "INSTALL_APK=$APK" >> "$GITHUB_ENV"
+          else
+            echo "requiredSplitTypes present, stripping + re-signing with a throwaway key"
+            sudo apt-get update -qq
+            sudo apt-get install -y apksigner
+            python3 .github/scripts/strip_required_splits.py "$APK" apk/stripped.apk
+            python3 .github/scripts/strip_required_splits.py --check apk/stripped.apk
+            python3 .github/scripts/strip_required_splits.py --check-arsc apk/stripped.apk
+            # No zipalign: it refuses LSPatch output ("header mismatch" —
+            # the overlapped origin.apk entry). apksigner tolerates it, and
+            # the strip script already guarantees resources.arsc alignment.
+            openssl req -x509 -newkey rsa:2048 -keyout probe-key.pem -out probe-cert.pem -days 3650 -nodes -subj "/CN=RedroidProbe" 2>/dev/null
+            openssl pkcs12 -export -out probe.p12 -inkey probe-key.pem -in probe-cert.pem -passout pass:android
+            apksigner sign --ks probe.p12 --ks-type PKCS12 --ks-pass pass:android --ks-key-alias 1 --key-pass pass:android --out apk/signed.apk apk/stripped.apk
+            apksigner verify apk/signed.apk && echo "signature verified"
+            echo "INSTALL_APK=apk/signed.apk" >> "$GITHUB_ENV"
+          fi
+
+      # The package is com.instagram.android for the theme/base builds but
+      # com.rdx.gram for the side-by-side build — read it from the APK
+      # manifest instead of hardcoding it (the hardcoded check gave a
+      # false NOT_INSTALLED for side-by-side 1.0 in run 43599812321).
+      - name: Detect package name from the APK manifest
+        if: steps.binder.outputs.binder_present == 'yes'
+        run: |
+          PKG=$(python3 - <<'PY'
+          import glob, zipfile, struct
+          apk = glob.glob("apk/*nstagram-*.apk")[0]
+          with zipfile.ZipFile(apk) as z:
+              axml = z.read("AndroidManifest.xml")
+          # string pool (UTF-8 or UTF-16)
+          flags = struct.unpack_from("<I", axml, 8 + 16)[0]
+          count = struct.unpack_from("<I", axml, 8 + 8)[0]
+          strings_start = struct.unpack_from("<I", axml, 8 + 20)[0]
+          offs = struct.unpack_from(f"<{count}I", axml, 8 + 28)
+          pool = axml[8:]
+          def get_string(idx):
+              p = strings_start + offs[idx]
+              if flags & 0x100:
+                  b = pool[p]
+                  ln, p = ((b & 0x7F) << 8 | pool[p+1], p+2) if b & 0x80 else (b, p+1)
+                  b = pool[p]
+                  p = p+2 if b & 0x80 else p+1
+                  return pool[p:p+ln].decode("utf-8", "replace")
+              ln = struct.unpack_from("<H", pool, p)[0]
+              p += 2
+              if ln & 0x8000:
+                  ln = ((ln & 0x7FFF) << 16) | struct.unpack_from("<H", pool, p)[0]
+                  p += 2
+              return pool[p:p+ln*2].decode("utf-16-le", "replace")
+          strings = [get_string(i) for i in range(count)]
+          # first START_ELEMENT chunk (<manifest>)
+          p = 8 + struct.unpack_from("<I", pool, 4)[0]
+          while p < len(axml):
+              ctype, hsize, size = struct.unpack_from("<HHI", axml, p)
+              if ctype == 0x0102:
+                  astart, asize, acount = struct.unpack_from("<HHH", axml, p + 24)
+                  for i in range(acount):
+                      a = p + 16 + astart + i * asize
+                      name_idx = struct.unpack_from("<I", axml, a + 4)[0]
+                      if strings[name_idx] == "package":
+                          dtype = axml[a + 15]
+                          data = struct.unpack_from("<I", axml, a + 16)[0]
+                          print(strings[data] if dtype == 3 else data)
+                          raise SystemExit(0)
+              p += size
+          raise SystemExit("package attribute not found")
+          PY
+          )
+          echo "package=$PKG"
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+
+      - name: Boot Redroid and test the APK
+        if: steps.binder.outputs.binder_present == 'yes'
+        run: |
+          set -x
+          docker --version
+          if ! command -v adb >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y adb; fi
+          adb version
+          IMAGE=""
+          # Tag scheme verified on Docker Hub (2026-11-14): the arm64-only
+          # images are named <ver>_64only-latest (e.g. 13.0.0_64only-latest,
+          # multi-arch amd64+arm64). There is NO -arm64 suffix — that was
+          # the "manifest unknown" failure in probe run 43595377933.
+          for TAG in 13.0.0_64only-latest 14.0.0_64only-latest 15.0.0_64only-latest; do
+            if docker pull "redroid/redroid:$TAG"; then IMAGE="redroid/redroid:$TAG"; break; fi
+          done
+          if [ -z "$IMAGE" ]; then echo "NO_REDROID_IMAGE" > status.txt; exit 0; fi
+          echo "using image $IMAGE" | tee -a status.txt
+          DOCKER_ARGS="--privileged --name redroid -p 5555:5555"
+          if [ -d /dev/binderfs ]; then DOCKER_ARGS="$DOCKER_ARGS -v /dev/binderfs:/dev/binderfs"; fi
+          docker run -d $DOCKER_ARGS "$IMAGE"
+          # Pin every adb command to the Redroid device: during boot a second
+          # adb transport can appear ("more than one device/emulator" killed
+          # probe run 43595666260). ANDROID_SERIAL does the pinning.
+          export ANDROID_SERIAL=localhost:5555
+          for i in $(seq 1 60); do
+            adb connect localhost:5555 2>&1 | grep -q "connected" && break
+            sleep 5
+          done
+          adb devices
+          adb wait-for-device
+          docker ps
+          # Redroid first boot is slow on a shared runner: wait up to 10 min
+          # for sys.boot_completed instead of 5.
+          BOOT=""
+          for i in $(seq 1 120); do
+            BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$BOOT" = "1" ] && break
+            if [ $((i % 12)) -eq 0 ]; then echo "still booting after $((i * 5))s (boot_completed='$BOOT')"; docker logs redroid --tail 5 2>&1 | tail -5 || true; fi
+            sleep 5
+          done
+          echo "boot_completed='$BOOT'" | tee -a status.txt
+          if [ "$BOOT" != "1" ]; then
+            echo "== boot diagnostics ==" > boot-diag.txt
+            docker ps >> boot-diag.txt 2>&1 || true
+            docker logs redroid --tail 80 >> boot-diag.txt 2>&1 || true
+            adb shell getprop 2>/dev/null | grep -E 'boot|init\.svc' >> boot-diag.txt || true
+            cat boot-diag.txt
+          fi
+          # Try the install even if boot_completed is not 1 yet; judge by
+          # whether the package actually lands, not by the step exit code.
+          adb install -r "$INSTALL_APK" || echo "adb install failed (see above)"
+          if adb shell pm list packages 2>/dev/null | grep -q "$PKG"; then
+            echo "installed" | tee -a status.txt
+            # Launch with `am start`, not monkey: monkey exits -5 without
+            # launching anything on Redroid 13 (probe run 43596433654 — it
+            # aborted right after "SYS_KEYS has no physical keys" and no
+            # Instagram process ever started). Give the PackageManager a
+            # moment to index the freshly installed package, resolve the
+            # launcher activity, then start it explicitly.
+            sleep 20
+            echo "== launcher activity ==" | tee launch.txt
+            LAUNCHER=""
+            for i in $(seq 1 6); do
+              LAUNCHER=$(adb shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "$PKG" 2>/dev/null | tr -d '\r' | tail -1)
+              [ -n "$LAUNCHER" ] && break
+              sleep 5
+            done
+            echo "launcher=$LAUNCHER" | tee -a launch.txt
+            if [ -n "$LAUNCHER" ]; then
+              adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n "$LAUNCHER" 2>&1 | tee -a launch.txt || true
+            else
+              echo "no launcher activity resolved, trying implicit intent" | tee -a launch.txt
+              adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "$PKG" 2>&1 | tee -a launch.txt || true
+            fi
+            sleep 45
+            adb shell pidof "$PKG" > pid.txt 2>&1 || echo "not-running" > pid.txt
+            adb logcat -d > logcat.txt
+            if grep -q "FATAL EXCEPTION" logcat.txt; then
+              echo "CRASHED" > status.txt
+            elif [ -s pid.txt ] && [ "$(cat pid.txt)" != "not-running" ]; then
+              echo "RUNNING" > status.txt
+            else
+              echo "NOT_RUNNING_NO_FATAL" > status.txt
+            fi
+            grep -B2 -A 40 "FATAL EXCEPTION" logcat.txt | head -80 > crash.txt || true
+          else
+            echo "NOT_INSTALLED" > status.txt
+            if [ "$BOOT" != "1" ]; then echo "NOT_BOOTED" >> status.txt; fi
+            adb logcat -d > logcat.txt || true
+          fi
+          echo "=== status ==="; cat status.txt
+          echo "=== pid ==="; cat pid.txt
+          echo "=== crash excerpt ==="; cat crash.txt
+
+      - name: Run login driver (own Instagram account)
+        if: steps.binder.outputs.binder_present == 'yes'
+        timeout-minutes: 30
+        env:
+          IG_USER: ${{ secrets.IG_LOGIN_USER }}
+          IG_PASS: ${{ secrets.IG_LOGIN_PASS }}
+          DEADLINE_SEC: "1440"
+        run: |
+          export ANDROID_SERIAL=localhost:5555
+          adb devices || true
+          adb shell pidof "$PKG" || echo "app not running at driver start"
+          python3 .github/scripts/ig_login_drive.py || true
+          echo "=== driver status ==="
+          cat status.txt || echo "no status.txt"
+          cat status.json || echo "no status.json"
+
+      - name: Upload probe results (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdxgram-arm-probe
+          path: |
+            binder.txt
+            status.txt
+            logcat.txt
+            crash.txt
+            pid.txt
+            boot-diag.txt
+            launch.txt
+            status.json
+            status.txt
+            timeline.txt
+            ui_step*.xml
+            shot_*.png
+            logcat-final.txt
+            crash-final.txt
+          retention-days: 30

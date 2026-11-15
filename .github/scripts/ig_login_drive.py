@@ -1,0 +1,589 @@
+#!/usr/bin/env python3
+"""RdxGram 1.5 login probe — log in with a REAL Instagram account inside
+the app on Redroid and reach the home feed.
+
+Runs on the GitHub Actions arm runner AFTER the boot step installed and
+launched the APK. Credentials arrive via environment (repo secrets) and are
+NEVER printed, logged, or stored in any output file. If Instagram asks for
+a verification code, the driver STOPS there (CODE_REQUIRED) — it never
+retries the password and never guesses a code. If the password is wrong,
+it stops at WRONG_PASSWORD. Only ONE login submit is ever attempted.
+
+Outputs (working dir): status.json, status.txt, timeline.txt, ui_step*.xml,
+shot_*.png, logcat-final.txt, crash-final.txt.
+Exit code is always 0 — the verdict lives in status.json/status.txt.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+
+SER = os.environ.get("ANDROID_SERIAL", "localhost:5555")
+PKG = os.environ["PKG"]
+USER = os.environ["IG_USER"]
+PASS = os.environ["IG_PASS"]
+DEADLINE = time.time() + int(os.environ.get("DEADLINE_SEC", "1440"))
+STATUS = {"status": "STARTED", "cold_start_total_ms": None, "fatal_count": 0,
+          "steps": 0, "screenshots": [], "started_at": int(time.time()),
+          "finished_at": None, "last_screen": None, "detail": "",
+          "code_destination_masked": None}
+
+
+def log(msg):
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    with open("timeline.txt", "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+def save_status():
+    STATUS["finished_at"] = int(time.time())
+    with open("status.json", "w", encoding="utf-8") as fh:
+        json.dump(STATUS, fh, indent=2, ensure_ascii=False)
+    with open("status.txt", "w", encoding="utf-8") as fh:
+        fh.write(STATUS["status"] + "\n")
+
+
+def adb(*args, timeout=60):
+    cmd = ["adb", "-s", SER] + list(args)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip(), r.stderr.strip(), r.returncode
+    except subprocess.TimeoutExpired:
+        return "", "adb timeout", 1
+
+
+def shell(*args, timeout=60):
+    return adb("shell", *args, timeout=timeout)
+
+
+def tap(x, y):
+    shell("input", "tap", str(x), str(y))
+    time.sleep(1)
+
+
+def keyevent(code):
+    shell("input", "keyevent", str(code))
+    time.sleep(0.5)
+
+
+def dismiss_keyboard():
+    keyevent(111)  # KEYCODE_ESCAPE
+
+
+def maybe_hide_keyboard(nodes):
+    """If an EditText is focused the soft keyboard is up and it covers the
+    lower buttons: a tap meant for a button lands on a keyboard key
+    instead (seen in run 43679452461: 58 taps on 'Sign up with email'
+    typed 58 '2's into the phone field). Hide it with BACK (which only
+    dismisses the keyboard while one is shown) and re-dump.
+    Returns fresh nodes (or the original ones if nothing was hidden)."""
+    focused = [n for n in nodes
+               if n["cls"].endswith("EditText")
+               and n.get("focused") == "true"]
+    # parse_dump drops the focused attr; re-check via a fresh attribute read
+    if not focused:
+        return nodes, False
+    log("keyboard is up (focused field); hiding it with BACK")
+    keyevent(4)
+    time.sleep(1.5)
+    path = dump(f"step{STATUS['steps']:02d}k")
+    fresh = parse_dump(path)
+    return fresh, True
+
+
+def type_text(s):
+    # spaces must be %s for `input text`; other chars go through as-is
+    arg = s.replace(" ", "%s")
+    shell("input", "text", arg)
+    time.sleep(1)
+
+
+def clear_field(center):
+    tap(*center)
+    for _ in range(30):
+        shell("input", "keyevent", "67")
+    time.sleep(0.5)
+
+
+def dump(name):
+    path = f"ui_{name}.xml"
+    for _ in range(3):
+        shell("uiautomator", "dump", "/sdcard/ui.xml")
+        out, _, _ = adb("pull", "/sdcard/ui.xml", path)
+        if os.path.exists(path) and os.path.getsize(path) > 100:
+            return path
+        time.sleep(2)
+    return path if os.path.exists(path) else None
+
+
+def parse_dump(path):
+    """Return list of nodes: dicts with text/desc/class/clickable/bounds."""
+    nodes = []
+    if not path or not os.path.exists(path):
+        return nodes
+    try:
+        tree = ET.parse(path)
+    except Exception:
+        return nodes
+    for n in tree.iter("node"):
+        b = n.get("bounds", "")
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", b)
+        center = ((int(m.group(1)) + int(m.group(3))) // 2,
+                  (int(m.group(2)) + int(m.group(4))) // 2) if m else None
+        nodes.append({
+            "text": n.get("text") or "",
+            "desc": n.get("content-desc") or "",
+            "cls": n.get("class") or "",
+            "clickable": n.get("clickable") == "true",
+            "bounds": b,
+            "center": center,
+            "resource": n.get("resource-id") or "",
+            "focused": n.get("focused") or "",
+        })
+    return nodes
+
+
+def all_text(nodes):
+    return " | ".join((n["text"] + " " + n["desc"]).strip()
+                      for n in nodes if n["text"] or n["desc"])
+
+
+def low(nodes):
+    return all_text(nodes).lower()
+
+
+def find(nodes, *patterns, clickable_only=False):
+    """First node whose text or desc contains any pattern (case-insensitive).
+    Prefer clickable nodes, then any node."""
+    best = None
+    for n in nodes:
+        hay = (n["text"] + " " + n["desc"]).lower()
+        if any(p.lower() in hay for p in patterns):
+            if n["center"] is None:
+                continue
+            if n["clickable"]:
+                return n
+            if best is None:
+                best = n
+    return best
+
+
+def find_exact(nodes, *labels):
+    """Clickable node whose text or desc is EXACTLY one of the labels
+    (case-insensitive). Avoids matching 'Log in with Facebook' when the
+    submit button 'Log in' is wanted."""
+    for n in nodes:
+        if not n["clickable"] or n["center"] is None:
+            continue
+        for lab in labels:
+            if n["text"].strip().lower() == lab.lower():
+                return n
+            if n["desc"].strip().lower() == lab.lower():
+                return n
+    return None
+
+
+def find_edit(nodes, *desc_prefixes):
+    for n in nodes:
+        if n["cls"].endswith("EditText"):
+            if not desc_prefixes:
+                return n
+            if any(n["desc"].lower().startswith(p.lower())
+                   for p in desc_prefixes):
+                return n
+    return None
+
+
+def edits(nodes):
+    return [n for n in nodes if n["cls"].endswith("EditText")]
+
+
+def screenshot(name):
+    shell("screencap", "-p", f"/sdcard/{name}.png")
+    out, _, _ = adb("pull", f"/sdcard/{name}.png", f"{name}.png")
+    if os.path.exists(f"{name}.png"):
+        STATUS["screenshots"].append(f"{name}.png")
+        log(f"screenshot saved: {name}.png")
+        return True
+    log(f"screenshot FAILED: {name}.png")
+    return False
+
+
+def pid_alive():
+    out, _, _ = shell("pidof", PKG)
+    return bool(out and out != "not-running")
+
+
+def logcat_fatal_count():
+    out, _, _ = adb("logcat", "-d", timeout=90)
+    return out.count("FATAL EXCEPTION"), out
+
+
+def check_alive(context):
+    if not pid_alive():
+        log(f"process DEAD after {context}")
+        return False
+    count, _ = logcat_fatal_count()
+    if count > STATUS["fatal_count"]:
+        STATUS["fatal_count"] = count
+        log(f"FATAL EXCEPTION seen in logcat after {context} (count={count})")
+        return False
+    return True
+
+
+def cold_start_ms():
+    try:
+        with open("launch.txt", encoding="utf-8", errors="replace") as fh:
+            m = re.search(r"TotalTime:\s*(\d+)", fh.read())
+            if m:
+                return int(m.group(1))
+    except OSError:
+        pass
+    return None
+
+
+def relaunch():
+    log("relaunching app")
+    out, _, _ = shell("cmd", "package", "resolve-activity", "--brief",
+                      "-a", "android.intent.action.MAIN",
+                      "-c", "android.intent.category.LAUNCHER", PKG)
+    launcher = out.strip().splitlines()[-1] if out.strip() else ""
+    if launcher and "/" in launcher:
+        shell("am", "start", "-W", "-a", "android.intent.action.MAIN",
+              "-c", "android.intent.category.LAUNCHER", "-n", launcher)
+    else:
+        shell("am", "start", "-W", "-a", "android.intent.action.MAIN",
+              "-c", "android.intent.category.LAUNCHER", PKG)
+    time.sleep(20)
+
+
+def extract_code_destination(nodes):
+    """The code screen shows the destination already masked by Instagram
+    (e.g. h••••@gmail.com, +98 ••• ••• 4426). Return that masked fragment
+    (or the 'sent' sentence) — never anything unmasked."""
+    text = all_text(nodes)
+    m = re.search(r"\S+@\S+", text)
+    if m:
+        return m.group(0)
+    m = re.search(r"\+\d[\d\s•*]{6,}", text)
+    if m:
+        return m.group(0).strip()
+    m = re.search(r"(we sent[^|]{0,120}|sent a code[^|]{0,120})",
+                  text, re.I)
+    if m:
+        return m.group(0).strip()
+    return text[:200]
+
+
+def classify(nodes):
+    t = low(nodes)
+    descs = " ".join(n["desc"].lower() for n in nodes)
+    # Wrong-password dialog sits ON TOP of the login form — check first.
+    if any(k in t for k in ("incorrect password",
+                            "password you've entered is incorrect",
+                            "the password you entered is incorrect",
+                            "wrong password")):
+        return "WRONG_PASSWORD"
+    nav_hits = sum(1 for k in ("home", "search and explore", "reels",
+                               "notifications", "profile")
+                   if k in descs or k in t)
+    if nav_hits >= 3 or "your story" in t:
+        return "FEED"
+    if any(k in t for k in (
+            "suspicious", "checkpoint", "confirm it's you",
+            "we need to confirm", "verify your account",
+            "unusual login", "help us confirm",
+            "is this your phone number",
+            "verify with a code", "add your phone number to",
+            "temporarily locked", "account locked")):
+        return "CHALLENGE"
+    if any(k in t for k in ("confirmation code", "enter the code",
+                            "enter code", "6-digit", "verification code",
+                            "enter the 6-digit code",
+                            "we sent a code", "sent a code to",
+                            "get a code", "two-factor")):
+        return "CODE"
+    # Login form BEFORE any single-field state: it has BOTH fields.
+    if find_edit(nodes, "Username") and find_edit(nodes, "Password"):
+        return "LOGIN_FORM"
+    if len(edits(nodes)) >= 2:
+        return "LOGIN_FORM"
+    if "save your login info" in t or "save login info" in t:
+        return "SAVE_LOGIN"
+    if any(k in t for k in ("create new account", "get started",
+                            "join instagram", "i already have a profile")):
+        return "LANDING"
+    if any(k in t for k in ("find people", "discover people",
+                            "follow people to see")):
+        return "FIND_PEOPLE"
+    if any(k in t for k in ("turn on notifications", "allow notifications",
+                            "enable notifications", "sync your contacts",
+                            "find your friends", "add to home screen")):
+        return "INTERSTITIAL"
+    if any(k in t for k in ("profile photo", "profile picture",
+                            "add a photo")):
+        return "PHOTO"
+    if any(k in t for k in ("we limit how often", "try again later",
+                            "too many attempts")):
+        return "RATE_LIMITED"
+    return "UNKNOWN"
+
+
+def tap_skip(nodes):
+    node = find(nodes, "Skip", "Not now", "Maybe later", "Don't allow",
+                "No thanks")
+    if node:
+        log(f"tapping dismiss: {node['text'] or node['desc']!r}")
+        tap(*node["center"])
+        return True
+    return False
+
+
+def tap_next(nodes):
+    node = find(nodes, "Next", "Continue", "Confirm", "Verify", "Set",
+                "Create account", "Sign up", "Log in")
+    if node:
+        log(f"tapping next: {node['text'] or node['desc']!r}")
+        tap(*node["center"])
+        return True
+    return False
+
+
+def finish(status, detail=""):
+    STATUS["status"] = status
+    STATUS["detail"] = detail
+    STATUS["cold_start_total_ms"] = cold_start_ms()
+    count, out = logcat_fatal_count()
+    STATUS["fatal_count"] = max(count, STATUS["fatal_count"])
+    with open("logcat-final.txt", "w", encoding="utf-8") as fh:
+        fh.write(out)
+    m = re.search(r"(FATAL EXCEPTION.{0,3000})", out, re.S)
+    with open("crash-final.txt", "w", encoding="utf-8") as fh:
+        fh.write(m.group(1) if m else "")
+    save_status()
+    log(f"FINAL: {status} — {detail}")
+
+
+def main():
+    STATUS["cold_start_total_ms"] = cold_start_ms()
+    save_status()
+    log(f"driver started; package={PKG}; deadline in "
+        f"{int(DEADLINE - time.time())}s")
+    if not pid_alive():
+        relaunch()
+    if not pid_alive():
+        return finish("NOT_RUNNING", "app process never started")
+
+    submitted = False
+    login_form_revisits = 0
+    last_state = None
+    same_state_runs = 0
+    kb_hidden_for = None  # state for which the keyboard was already hidden
+
+    for step in range(1, 61):
+        STATUS["steps"] = step
+        if time.time() > DEADLINE:
+            return finish("TIMEOUT", "driver deadline reached")
+        path = dump(f"step{step:02d}")
+        nodes = parse_dump(path)
+        state = classify(nodes)
+        # A focused field means the soft keyboard is up and covers the
+        # lower buttons: hide it once per screen visit before any button
+        # tap, then re-classify. (Hiding twice would send a real BACK.)
+        if state in ("LOGIN_FORM", "CODE", "SAVE_LOGIN", "FIND_PEOPLE",
+                     "INTERSTITIAL", "LANDING"):
+            if kb_hidden_for != state:
+                nodes, hid = maybe_hide_keyboard(nodes)
+                if hid:
+                    kb_hidden_for = state
+                    state = classify(nodes)
+        if state != last_state and kb_hidden_for != state:
+            kb_hidden_for = None
+        STATUS["last_screen"] = state
+        # Stuck detection: same state 6 times in a row = no progress.
+        if state == last_state:
+            same_state_runs += 1
+        else:
+            last_state = state
+            same_state_runs = 1
+        if same_state_runs >= 6:
+            screenshot(f"shot_stuck_{state.lower()}")
+            return finish(f"STUCK_{state}",
+                          f"same screen {same_state_runs} steps in a row "
+                          f"with no progress")
+        log(f"step {step}: screen={state} "
+            f"texts={all_text(nodes)[:300]!r}")
+        save_status()
+
+        if state == "FEED":
+            log("HOME FEED REACHED — login succeeded")
+            screenshot("shot_feed")
+            home = find(nodes, "Search and explore")
+            if home:
+                tap(*home["center"])
+                time.sleep(3)
+                screenshot("shot_explore")
+            nodes2 = parse_dump(dump("step_explore"))
+            prof = find(nodes2, "Profile")
+            if prof:
+                tap(*prof["center"])
+                time.sleep(3)
+                screenshot("shot_profile")
+            nodes3 = parse_dump(dump("step_home2"))
+            hm = find(nodes3, "Home")
+            if hm:
+                tap(*hm["center"])
+                time.sleep(2)
+                screenshot("shot_feed2")
+            if not check_alive("feed screenshots"):
+                return finish("CRASHED_AFTER_FEED",
+                              "FATAL or dead process after reaching feed")
+            return finish("LOGGED_IN_FEED", "home feed + explore + profile "
+                          "captured")
+
+        if state == "WRONG_PASSWORD":
+            screenshot("shot_wrong_password")
+            return finish("WRONG_PASSWORD",
+                          f"Instagram rejected the password: "
+                          f"{all_text(nodes)[:300]!r}")
+
+        if state == "CODE":
+            dest = extract_code_destination(nodes)
+            STATUS["code_destination_masked"] = dest
+            save_status()
+            screenshot("shot_code_required")
+            return finish("CODE_REQUIRED",
+                          f"Instagram asked for a verification code. "
+                          f"Destination (as shown, masked): {dest}")
+
+        if state == "CHALLENGE":
+            screenshot("shot_challenge")
+            return finish("CHALLENGE",
+                          f"Instagram asked for extra verification: "
+                          f"{all_text(nodes)[:400]!r}")
+
+        if state == "RATE_LIMITED":
+            screenshot("shot_rate_limited")
+            return finish("RATE_LIMITED",
+                          f"Instagram rate-limited the login: "
+                          f"{all_text(nodes)[:300]!r}")
+
+        if state == "LANDING":
+            node = find(nodes, "I already have a profile")
+            if node:
+                log("tapping 'I already have a profile'")
+                tap(*node["center"])
+                time.sleep(3)
+                continue
+            node = find_exact(nodes, "Log in")
+            if node:
+                log("tapping 'Log in' on landing")
+                tap(*node["center"])
+                time.sleep(3)
+                continue
+            return finish("STUCK_LANDING", "landing has no login button")
+
+        if state == "LOGIN_FORM":
+            if submitted:
+                # One submit only: if the form is still showing, give it
+                # one more chance, then stop — never re-submit.
+                login_form_revisits += 1
+                if login_form_revisits >= 2:
+                    screenshot("shot_login_no_advance")
+                    return finish("LOGIN_NO_ADVANCE",
+                                  "login form still showing after submit, "
+                                  "no error dialog and no advance")
+                log("still on login form after submit; waiting once more")
+                time.sleep(8)
+                continue
+            # Login-only probe: never tap "Sign up" / "Create new account".
+            eds = edits(nodes)
+            user_field = find_edit(nodes, "Username") or (
+                eds[0] if eds else None)
+            pass_field = find_edit(nodes, "Password") or (
+                eds[1] if len(eds) > 1 else None)
+            if not user_field or not pass_field:
+                return finish("STUCK_LOGIN_FORM",
+                              "login form has no username/password fields")
+            tap(*user_field["center"])
+            type_text(USER)
+            # Verify the username landed WITHOUT logging its value.
+            nodes_chk = parse_dump(dump(f"step{step:02d}u"))
+            shown = " ".join(n["text"] for n in edits(nodes_chk))
+            if USER not in shown:
+                log("username text did not land; retrying once")
+                clear_field(user_field["center"])
+                type_text(USER)
+            tap(*pass_field["center"])
+            type_text(PASS)
+            log("username and password filled; hiding keyboard")
+            dismiss_keyboard()
+            time.sleep(1)
+            nodes_sub = parse_dump(dump(f"step{step:02d}b"))
+            btn = find_exact(nodes_sub, "Log in")
+            if not btn:
+                btn = find(nodes_sub, "Log in")
+            if not btn:
+                return finish("STUCK_LOGIN_FORM",
+                              "no Log in button on login form")
+            log("tapping Log in (submit) — single login attempt")
+            tap(*btn["center"])
+            submitted = True
+            time.sleep(10)
+            continue
+
+        if state == "SAVE_LOGIN":
+            if tap_skip(nodes):
+                time.sleep(3)
+                continue
+            screenshot("shot_save_login")
+            return finish("STUCK_SAVE_LOGIN",
+                          "save-login sheet has no Not-now button")
+
+        if state in ("FIND_PEOPLE", "INTERSTITIAL", "PHOTO"):
+            if tap_skip(nodes):
+                time.sleep(3)
+                continue
+            if tap_next(nodes):
+                time.sleep(3)
+                continue
+            screenshot(f"shot_stuck_{state.lower()}")
+            return finish(f"STUCK_{state}",
+                          f"no Skip/Not-now on {state} screen")
+
+        # UNKNOWN — could be a post-login extra prompt (birthday / phone):
+        # the login itself already succeeded in that case.
+        t = low(nodes)
+        if submitted and any(k in t for k in ("birthday", "date of birth",
+                                              "add your phone number",
+                                              "add a phone number")):
+            screenshot("shot_post_login_prompt")
+            return finish("LOGGED_IN_EXTRA_PROMPT",
+                          f"login advanced past the form; Instagram now "
+                          f"asks for extra profile info: "
+                          f"{all_text(nodes)[:300]!r}")
+        if tap_skip(nodes):
+            time.sleep(3)
+            continue
+        screenshot(f"shot_unknown_{step:02d}")
+        return finish("UNKNOWN_SCREEN",
+                      f"unrecognized screen: {all_text(nodes)[:400]!r}")
+
+    return finish("TOO_MANY_STEPS", "60 steps without a verdict")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        try:
+            finish("DRIVER_ERROR", f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
+    sys.exit(0)
