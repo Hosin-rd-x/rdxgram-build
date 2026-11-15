@@ -137,7 +137,14 @@
   "0x7f0827e1": "instagram_reels_prism_outline_24",
   "0x7f0828c3": "instagram_star_pano_filled_32",
   "0x7f0828c7": "instagram_star_pano_outline_32",
-  "0x7f082003": "rdx_placeholder_7f082003"
+  "0x7f082003": "rdx_placeholder_7f082003",
+  "0x7f082779": "instagram_photo_grid_tall_add_outline_24",
+  "0x7f08277a": "instagram_photo_grid_tall_pano_filled_24",
+  "0x7f08277b": "instagram_photo_grid_tall_pano_outline_24",
+  "0x7f082a10": "instagram_wordmark_ig_wordmark_r3_finalize_v1",
+  "0x7f082a11": "instagram_x_filled_12",
+  "0x7f082a12": "instagram_x_filled_16",
+  "0x7f082f7c": "sessionless_nux_nux_logo"
  },
  "xml_stubs": {
   "0x7f080587": "direct_reply_bar_voice_message_indicator",
