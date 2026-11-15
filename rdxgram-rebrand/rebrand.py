@@ -584,9 +584,13 @@ def main():
         # count as defined, whatever their value is.
         value_defined = _value_defined_items(decoded)
         file_type_dirs = {
+            # ".gif"/".json" are real drawable files in stock 451 (an
+            # animated GIF + Lottie JSONs); without them 2e pruned their
+            # <public> entries and aapt2 moved them to new ids, so any
+            # code referencing the original ids failed at runtime.
             "layout": ("layout", (".xml",)),
-            "drawable": ("drawable", (".xml", ".png", ".jpg", ".jpeg", ".webp", ".9.png")),
-            "mipmap": ("mipmap", (".xml", ".png", ".jpg", ".jpeg", ".webp")),
+            "drawable": ("drawable", (".xml", ".png", ".jpg", ".jpeg", ".webp", ".9.png", ".gif", ".json")),
+            "mipmap": ("mipmap", (".xml", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".json")),
             "anim": ("anim", (".xml",)),
             "animator": ("animator", (".xml",)),
             "raw": ("raw", None),
