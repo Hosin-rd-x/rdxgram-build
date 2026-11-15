@@ -29,18 +29,21 @@ library only and asserts, for a rebuilt or LSPatch-patched APK:
     tab_bar_height_panorama = 48dp (Base.Theme.Instagram
     tabBarHeight), 0x7f0700e0 circular_avatar_stroke_width = 2px
     (Avatar strokeWidth), 0x7f07014b direct_in_thread_composer_
-    top_margin = 6dp (BaseNightTheme and Theme.Instagram
-    mediaViewOuterVerticalMargin). A literal in the style item
+    top_margin = 8dp (BaseNightTheme and Theme.Instagram
+    mediaViewOuterVerticalMargin). (1.8: the 6dp in the 1.1-1.7
+    checks was the InstaPro 439 guess — the real 451 density split
+    says 8dp.) A literal in the style item
     would be WRONG: InstagramMainActivity resolves tabBarHeight
     with Theme.resolveAttribute and passes TypedValue.resourceId
     to getDimensionPixelOffset, and a literal has resourceId 0
     (1.2 crashed that way on relaunch, Redroid 43610901393).
   - the Play-split drawable/string restores (rebrand step 2j) are
-    present at their ORIGINAL ids: the six drawables the main
+    present at their ORIGINAL ids: the seven drawables the main
     activity's bundled layouts need (verified_profile,
     instagram_chevron_down_pano_filled_12, instagram_x_pano_
     outline_8, instagram_call_pano_filled_12, from_meta_
-    attribution, instagram) and the six placeholder strings;
+    attribution at 0x7f081e6a, from_meta_gradient at 0x7f081e6b,
+    instagram) and the six placeholder strings;
   - the Play-split XML-drawable sweep (rebrand step 2k) is present
     at its ORIGINAL ids, driven by the same split-restores-2k.json
     the rebrand reads: the 119 image drawables and 2 XML stubs
@@ -288,8 +291,8 @@ def main():
         # (style, attr, dimen entry id, value, unit)
         ("Base.Theme.Instagram", "tabBarHeight", 0x0263, 48.0, "dp"),
         ("Avatar", "strokeWidth", 0x00E0, 2.0, "px"),
-        ("BaseNightTheme", "mediaViewOuterVerticalMargin", 0x014B, 6.0, "dp"),
-        ("Theme.Instagram", "mediaViewOuterVerticalMargin", 0x014B, 6.0, "dp"),
+        ("BaseNightTheme", "mediaViewOuterVerticalMargin", 0x014B, 8.0, "dp"),
+        ("Theme.Instagram", "mediaViewOuterVerticalMargin", 0x014B, 8.0, "dp"),
     ]
     repair_values = {}
     dimen_values = {}
@@ -315,7 +318,11 @@ def main():
         (0x2330, "instagram_chevron_down_pano_filled_12"),
         (0x2A1D, "instagram_x_pano_outline_8"),
         (0x22CC, "instagram_call_pano_filled_12"),
-        (0x1E6B, "from_meta_attribution"),
+        (0x1E6A, "from_meta_attribution"),
+        # 1.8: from_meta_attribution was checked at 0x1E6B here since
+        # 1.1 — wrong by one. The real 451 split puts it at 0x1E6A
+        # (code references 0x7f081e6a); 0x1E6B is from_meta_gradient.
+        (0x1E6B, "from_meta_gradient"),
         (0x2190, "instagram"),
     ]
     split_strings = [
