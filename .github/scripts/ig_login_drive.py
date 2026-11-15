@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RdxGram 1.5 login probe — log in with a REAL Instagram account inside
+"""RdxGram 1.8 login probe — log in with a REAL Instagram account inside
 the app on Redroid and reach the home feed.
 
 Runs on the GitHub Actions arm runner AFTER the boot step installed and
@@ -27,6 +27,11 @@ value itself is never logged, printed, or written to any output file.
 After a successful login the driver lets the feed settle a few seconds,
 screenshots home / explore / profile, and checks the log for FATAL
 crashes (CRASHED_AFTER_FEED if any appear).
+
+After a successful login Android may also show the system
+notification-permission dialog ("Allow Rdx gram to send you
+notifications?"). The driver dismisses it with "Don't allow" so it can
+reach the feed instead of ending on UNKNOWN_SCREEN.
 
 Outputs (working dir): status.json, status.txt, timeline.txt, ui_step*.xml,
 shot_*.png, logcat-final.txt, crash-final.txt.
@@ -402,6 +407,10 @@ def classify(nodes):
                             "the password you entered is incorrect",
                             "wrong password")):
         return "WRONG_PASSWORD"
+    # System notification-permission dialog can overlay the feed, so
+    # it must win over the FEED nav check below.
+    if "send you notifications" in t:
+        return "NOTIF_DIALOG"
     nav_hits = sum(1 for k in ("home", "search and explore", "reels",
                                "notifications", "profile")
                    if k in descs or k in t)
@@ -746,6 +755,21 @@ def main():
             screenshot("shot_save_login")
             return finish("STUCK_SAVE_LOGIN",
                           "save-login sheet has no Not-now button")
+
+        if state == "NOTIF_DIALOG":
+            btn = find_exact(nodes, "Don't allow", "Don’t allow") or \
+                find(nodes, "Don't allow")
+            if btn:
+                log("system notification-permission dialog "
+                    "('Allow Rdx gram to send you notifications?'); "
+                    "tapping Don't allow")
+                tap(*btn["center"])
+                time.sleep(2)
+                continue
+            screenshot("shot_notif_dialog")
+            return finish("STUCK_NOTIF_DIALOG",
+                          "notification-permission dialog has no "
+                          "Don't allow button")
 
         if state in ("FIND_PEOPLE", "INTERSTITIAL", "PHOTO"):
             if tap_skip(nodes):

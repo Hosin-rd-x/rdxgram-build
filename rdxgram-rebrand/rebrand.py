@@ -71,8 +71,11 @@ What it does (only these, nothing else):
      InstaPro 439 APK (same codebase lineage, complete resources):
      dimen 0x7f070263 tab_bar_height_panorama = 48dp (tabBarHeight),
      0x7f0700e0 circular_avatar_stroke_width = 2px (strokeWidth),
-     0x7f07014b direct_in_thread_composer_top_margin = 6dp
-     (mediaViewOuterVerticalMargin). A LITERAL in the style item
+     0x7f07014b direct_in_thread_composer_top_margin = 8dp
+     (mediaViewOuterVerticalMargin). The 48dp/2px values were first
+     read from InstaPro 439 and later confirmed against the real 451
+     density split; the top margin was 6dp in InstaPro but the real
+     451 split says 8dp (corrected in 1.8 — the 6dp guess is gone). A LITERAL in the style item
      would be WRONG: layout inflation (TypedArray) accepts literals,
      but InstagramMainActivity resolves tabBarHeight with
      Theme.resolveAttribute and passes TypedValue.resourceId to
@@ -779,7 +782,7 @@ def main():
          "Base.Theme.Instagram tabBarHeight"),
         (0x7F0700E0, "circular_avatar_stroke_width", "2px",
          "Avatar strokeWidth"),
-        (0x7F07014B, "direct_in_thread_composer_top_margin", "6dp",
+        (0x7F07014B, "direct_in_thread_composer_top_margin", "8dp",
          "BaseNightTheme/Theme.Instagram mediaViewOuterVerticalMargin"),
     ]
     split_repairs = [
@@ -866,11 +869,16 @@ def main():
     # bundled layouts reference the ids directly.
     split_drawables = [
         # (resource id, drawable name)
+        # NOTE (1.8): from_meta_attribution was 0x7F081E6B here since
+        # 1.1 — WRONG by one. The real 451 density split puts
+        # from_meta_attribution at 0x7F081E6A (the dex audit proves
+        # code references 0x7f081e6a); 0x7F081E6B is a different
+        # drawable, from_meta_gradient, which 2k restores separately.
         (0x7F0831D1, "verified_profile"),
         (0x7F082330, "instagram_chevron_down_pano_filled_12"),
         (0x7F082A1D, "instagram_x_pano_outline_8"),
         (0x7F0822CC, "instagram_call_pano_filled_12"),
-        (0x7F081E6B, "from_meta_attribution"),
+        (0x7F081E6A, "from_meta_attribution"),
         (0x7F082190, "instagram"),
     ]
     split_strings = [
@@ -1146,8 +1154,123 @@ def main():
                 % (rel,
                    sum(1 for fx in fixes if fx["new"] is not None),
                    sum(1 for fx in fixes if fx["new"] is None)))
+        # (e) extra integers: append to rdx_split_integers.xml (same
+        # shape as (c)) + public entries. 1.8: density_value = 6, from
+        # the real 451 density split.
+        n_int = 0
+        integers_path = os.path.join(decoded, "res", "values",
+                                     "rdx_split_integers.xml")
+        if os.path.isfile(integers_path):
+            with open(integers_path, "r", encoding="utf-8") as fh:
+                itext = fh.read()
+            if "</resources>" not in itext:
+                print("SPLIT_2K_MISSING: </resources> not found in "
+                      "rdx_split_integers.xml")
+                return 1
+        else:
+            itext = ('<?xml version="1.0" encoding="utf-8"?>\n'
+                     "<resources>\n</resources>\n")
+        for rid_s, (name, value) in sorted(
+                data2k.get("integers", {}).items()):
+            rid = int(rid_s, 16)
+            if ('<integer name="%s"' % name) not in itext:
+                itext = itext.replace(
+                    "</resources>",
+                    '    <integer name="%s">%d</integer>\n</resources>'
+                    % (name, value), 1)
+            try:
+                public_lines = _insert_public_entry(
+                    public_lines, "integer", name, rid)
+            except ValueError as exc:
+                print("SPLIT_2K_CONFLICT: %s" % exc)
+                return 1
+            n_int += 1
+            changes.append("2k restore integer %s -> %s (%d)"
+                           % (name, rid_s, value))
+        with open(integers_path, "w", encoding="utf-8") as fh:
+            fh.write(itext)
+        with open(public_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(public_lines) + "\n")
+        # (f) raw files: copy from split_dir2k/raw-*/ to the same dir
+        # in the decoded tree + public entries. 1.8: the splash
+        # gradient texture.
+        n_raw = 0
+        for rid_s, name in sorted(data2k.get("raws", {}).items()):
+            rid = int(rid_s, 16)
+            copied = []
+            for dens in sorted(os.listdir(split_dir2k)):
+                if not dens.startswith("raw-"):
+                    continue
+                for fname in sorted(os.listdir(
+                        os.path.join(split_dir2k, dens))):
+                    if _drawable_base(fname) != name:
+                        continue
+                    src = os.path.join(split_dir2k, dens, fname)
+                    dst_dir = os.path.join(decoded, "res", dens)
+                    os.makedirs(dst_dir, exist_ok=True)
+                    with open(src, "rb") as fh:
+                        blob = fh.read()
+                    with open(os.path.join(dst_dir, fname), "wb") as fh:
+                        fh.write(blob)
+                    copied.append("%s/%s" % (dens, fname))
+            if not copied:
+                print("SPLIT_2K_MISSING: no file for raw %s (%s) "
+                      "in %s" % (name, rid_s, split_dir2k))
+                return 1
+            try:
+                public_lines = _insert_public_entry(
+                    public_lines, "raw", name, rid)
+            except ValueError as exc:
+                print("SPLIT_2K_CONFLICT: %s" % exc)
+                return 1
+            n_raw += 1
+            changes.append("2k restore raw %s -> %s (%s)"
+                           % (name, rid_s, ", ".join(copied)))
+        with open(public_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(public_lines) + "\n")
+        # (g) integer arrays: append to rdx_split_arrays.xml +
+        # public entries. 1.8: the splash gradient geometry
+        # (6 ints, from the real 451 density split).
+        n_arr = 0
+        arrays_path = os.path.join(decoded, "res", "values",
+                                   "rdx_split_arrays.xml")
+        if os.path.isfile(arrays_path):
+            with open(arrays_path, "r", encoding="utf-8") as fh:
+                atext = fh.read()
+            if "</resources>" not in atext:
+                print("SPLIT_2K_MISSING: </resources> not found in "
+                      "rdx_split_arrays.xml")
+                return 1
+        else:
+            atext = ('<?xml version="1.0" encoding="utf-8"?>\n'
+                     "<resources>\n</resources>\n")
+        for rid_s, (name, items) in sorted(
+                data2k.get("arrays", {}).items()):
+            rid = int(rid_s, 16)
+            if ('<integer-array name="%s"' % name) not in atext:
+                inner = "".join(
+                    '        <item>%d</item>\n' % it for it in items)
+                atext = atext.replace(
+                    "</resources>",
+                    '    <integer-array name="%s">\n%s    </integer-array>'
+                    '\n</resources>' % (name, inner), 1)
+            try:
+                public_lines = _insert_public_entry(
+                    public_lines, "array", name, rid)
+            except ValueError as exc:
+                print("SPLIT_2K_CONFLICT: %s" % exc)
+                return 1
+            n_arr += 1
+            changes.append("2k restore array %s -> %s (%d items)"
+                           % (name, rid_s, len(items)))
+        with open(arrays_path, "w", encoding="utf-8") as fh:
+            fh.write(atext)
+        with open(public_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(public_lines) + "\n")
         changes.append("2k total: %d drawables, %d xml stubs, %d dimens, "
                        "%d xml files fixed" % (n_draw, n_stub, n_dim, n_xml))
+        changes.append("2k extra: %d integers, %d raws, %d arrays"
+                       % (n_int, n_raw, n_arr))
 
     if not keep_package:
         # 3. Label string value in every values*/strings.xml
