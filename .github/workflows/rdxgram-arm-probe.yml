@@ -9,10 +9,14 @@
 # truth about whether the app really launches.
 #
 # Trigger: manual only (workflow_dispatch). Input apk_tag defaults to the
-# release under test (currently RdxGram side-by-side 1.2):
-# if stock itself does not launch on Redroid, no modified build can be
-# judged against this probe). The job does NOT fail when the app crashes — a crash is
-# a result, not a CI failure. Verdict lives in status.txt in the artifact.
+# release under test (currently RdxGram side-by-side 1.4).
+# Optional tap_login ("true"): after the 45s launch wait, dump the UI
+# hierarchy, tap the "Log in" button on the signed-out screen, wait, and
+# capture a second logcat + UI dump. This reproduces the login-tap crash
+# Hossein reported on 1.4 (launch is fine, tapping Log in crashes).
+# If a login form appears with another "Log in" button, it is tapped too
+# (empty submit) and a third logcat is captured. The job still never fails
+# on a crash — a crash is a result. Verdicts live in status.txt.
 #
 # Step 1 (always runs): probe the runner kernel for Android binder/ashmem.
 # If binder loads (either /dev/binder or a binderfs mount), steps 2+3 boot
@@ -28,7 +32,11 @@ on:
       apk_tag:
         description: "Release tag of the already-built APK to test"
         required: true
-        default: "instagram-451.0.0.53.80-rdxgram-theme-1.2"
+        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.4"
+      tap_login:
+        description: "Tap the Log in button after launch and capture a second logcat (true/false)"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -268,6 +276,102 @@ jobs:
               echo "NOT_RUNNING_NO_FATAL" > status.txt
             fi
             grep -B2 -A 40 "FATAL EXCEPTION" logcat.txt | head -80 > crash.txt || true
+            # --- tap-login phase (only when requested and the app is alive) ---
+            echo "tap_login=${{ inputs.tap_login }}" | tee -a timing.txt
+            date +%s > timing-launch-epoch.txt
+            if [ "${{ inputs.tap_login }}" = "true" ] && [ "$(cat status.txt)" = "RUNNING" ]; then
+              echo "== tap-login phase: dump signed-out UI ==" | tee -a timing.txt
+              adb shell uiautomator dump /sdcard/ui1.xml 2>&1 | tee -a timing.txt || echo "UIA_DUMP1_FAILED" | tee -a timing.txt
+              adb pull /sdcard/ui1.xml ui1.xml 2>&1 | tail -1 || echo "UI1_PULL_FAILED" | tee -a timing.txt
+              TAP_START=$(date +%s)
+              echo "tap_start_epoch=$TAP_START" >> timing.txt
+              python3 - <<'PY' > tap.txt 2>&1 || echo "TAP_PARSE_FAILED" >> tap.txt
+              import re, sys
+              try:
+                  xml = open("ui1.xml", encoding="utf-8", errors="replace").read()
+              except OSError as e:
+                  print("NO_UI1_XML", e); sys.exit(0)
+              # list every clickable node so the screen is visible even if no match
+              nodes = re.findall(r'<node[^>]*>', xml)
+              print(f"nodes={len(nodes)}")
+              for n in nodes:
+                  t = re.search(r'text="([^"]*)"', n)
+                  d = re.search(r'content-desc="([^"]*)"', n)
+                  c = re.search(r'clickable="(true|false)"', n)
+                  b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
+                  cls = re.search(r'class="([^"]*)"', n)
+                  if (t and t.group(1)) or (d and d.group(1)):
+                      print(f"  clickable={c.group(1) if c else '?'} class={cls.group(1) if cls else '?'} text={t.group(1) if t else ''!r} desc={d.group(1) if d else ''!r} bounds={b.groups() if b else None}")
+              # the signed-out screen's button: text exactly "Log in"
+              for n in nodes:
+                  t = re.search(r'text="([^"]*)"', n)
+                  c = re.search(r'clickable="([^"]*)"', n)
+                  b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
+                  if t and t.group(1) == "Log in" and c and c.group(1) == "true" and b:
+                      x1, y1, x2, y2 = map(int, b.groups())
+                      print(f"TAP {(x1+x2)//2} {(y1+y2)//2}")
+                      break
+              else:
+                  print("NO_LOGIN_BUTTON_FOUND")
+              PY
+              cat tap.txt
+              TAPXY=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap.txt | head -1 || true)
+              if [ -n "$TAPXY" ]; then
+                set -- $TAPXY
+                echo "tapping Log in at $2 $3" | tee -a timing.txt
+                adb shell input tap "$2" "$3" || echo "TAP_FAILED" | tee -a timing.txt
+              else
+                echo "no Log in button to tap (see ui1.xml / tap.txt)" | tee -a timing.txt
+              fi
+              sleep 20
+              TAP_END=$(date +%s)
+              echo "tap_end_epoch=$TAP_END tap_to_result_seconds=$((TAP_END - TAP_START))" >> timing.txt
+              adb shell pidof "$PKG" > pid2.txt 2>&1 || echo "not-running" > pid2.txt
+              adb logcat -d > logcat2.txt
+              grep -B2 -A 40 "FATAL EXCEPTION" logcat2.txt | head -80 > crash2.txt || true
+              adb shell uiautomator dump /sdcard/ui2.xml 2>&1 | tee -a timing.txt || echo "UIA_DUMP2_FAILED" | tee -a timing.txt
+              adb pull /sdcard/ui2.xml ui2.xml 2>&1 | tail -1 || echo "UI2_PULL_FAILED" | tee -a timing.txt
+              echo "pid_after_tap=$(cat pid2.txt | tr -d '\n')" | tee -a timing.txt
+              if grep -q "FATAL EXCEPTION" logcat2.txt; then
+                echo "CRASHED_AFTER_LOGIN_TAP" | tee -a status.txt
+              elif [ "$(cat pid2.txt)" != "not-running" ]; then
+                echo "ALIVE_AFTER_LOGIN_TAP" | tee -a status.txt
+                # If a login form is now showing, tap its Log in button too (empty submit).
+                python3 - <<'PY' > tap2.txt 2>&1 || echo "TAP2_PARSE_FAILED" >> tap2.txt
+                import re, sys
+                try:
+                    xml = open("ui2.xml", encoding="utf-8", errors="replace").read()
+                except OSError as e:
+                    print("NO_UI2_XML", e); sys.exit(0)
+                nodes = re.findall(r'<node[^>]*>', xml)
+                for n in nodes:
+                    t = re.search(r'text="([^"]*)"', n)
+                    c = re.search(r'clickable="([^"]*)"', n)
+                    b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
+                    if t and t.group(1) == "Log in" and c and c.group(1) == "true" and b:
+                        x1, y1, x2, y2 = map(int, b.groups())
+                        print(f"TAP {(x1+x2)//2} {(y1+y2)//2}")
+                        break
+                else:
+                    print("NO_FORM_LOGIN_BUTTON")
+                PY
+                cat tap2.txt
+                TAP2=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap2.txt | head -1 || true)
+                if [ -n "$TAP2" ]; then
+                  set -- $TAP2
+                  echo "tapping form Log in at $2 $3" | tee -a timing.txt
+                  adb shell input tap "$2" "$3" || echo "TAP2_FAILED" | tee -a timing.txt
+                  sleep 20
+                  adb shell pidof "$PKG" > pid3.txt 2>&1 || echo "not-running" > pid3.txt
+                  adb logcat -d > logcat3.txt
+                  grep -B2 -A 40 "FATAL EXCEPTION" logcat3.txt | head -80 > crash3.txt || true
+                  if grep -q "FATAL EXCEPTION" logcat3.txt; then echo "CRASHED_AFTER_FORM_LOGIN_TAP" | tee -a status.txt; else echo "ALIVE_AFTER_FORM_LOGIN_TAP" | tee -a status.txt; fi
+                fi
+              else
+                echo "NOT_RUNNING_AFTER_LOGIN_TAP_NO_FATAL" | tee -a status.txt
+              fi
+              echo "=== tap phase done ==="; cat timing.txt
+            fi
           else
             echo "NOT_INSTALLED" > status.txt
             if [ "$BOOT" != "1" ]; then echo "NOT_BOOTED" >> status.txt; fi
@@ -290,4 +394,15 @@ jobs:
             pid.txt
             boot-diag.txt
             launch.txt
+            timing.txt
+            tap.txt
+            tap2.txt
+            ui1.xml
+            ui2.xml
+            logcat2.txt
+            crash2.txt
+            pid2.txt
+            logcat3.txt
+            crash3.txt
+            pid3.txt
           retention-days: 30
