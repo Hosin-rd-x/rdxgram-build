@@ -4,10 +4,29 @@ the app on Redroid and reach the home feed.
 
 Runs on the GitHub Actions arm runner AFTER the boot step installed and
 launched the APK. Credentials arrive via environment (repo secrets) and are
-NEVER printed, logged, or stored in any output file. If Instagram asks for
-a verification code, the driver STOPS there (CODE_REQUIRED) — it never
-retries the password and never guesses a code. If the password is wrong,
-it stops at WRONG_PASSWORD. Only ONE login submit is ever attempted.
+NEVER printed, logged, or stored in any output file. If the password is
+wrong, it stops at WRONG_PASSWORD. Only ONE login submit is ever attempted.
+
+Verification code: if Instagram asks for a 6-digit code after the login
+submit, the driver WAITS for it instead of stopping. The code comes from
+one of two sources, in this order:
+  1. IG_CODE — repo secret IG_LOGIN_CODE, set before the run starts.
+     (A code issued by an earlier login is bound to that login, so in
+     practice this only works if the code is already in hand at dispatch.)
+  2. IG_CODE_URL — repo secret IG_CODE_URL, a one-time mailbox file the
+     operator writes while the run waits; the driver polls it every 15 s
+     for up to CODE_WAIT_SEC (default 600 s) until the body is exactly
+     6 digits. This is the path that works for the real flow: the fresh
+     login in this run triggers a fresh code, the operator reads it from
+     the mailbox and writes it to the file.
+At most TWO code attempts: if no code arrives, the driver waits once more
+and then ends with CODE_TIMEOUT; if an entered code is rejected, it waits
+once more for a fresh code and then ends with CODE_REJECTED. The code
+value itself is never logged, printed, or written to any output file.
+
+After a successful login the driver lets the feed settle a few seconds,
+screenshots home / explore / profile, and checks the log for FATAL
+crashes (CRASHED_AFTER_FEED if any appear).
 
 Outputs (working dir): status.json, status.txt, timeline.txt, ui_step*.xml,
 shot_*.png, logcat-final.txt, crash-final.txt.
@@ -19,17 +38,26 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 import xml.etree.ElementTree as ET
 
 SER = os.environ.get("ANDROID_SERIAL", "localhost:5555")
 PKG = os.environ["PKG"]
 USER = os.environ["IG_USER"]
 PASS = os.environ["IG_PASS"]
+# Verification-code sources (see module docstring). IG_CODE is the repo
+# secret IG_LOGIN_CODE, fixed when the step starts; IG_CODE_URL is the
+# repo secret IG_CODE_URL, polled while the run waits on the code screen.
+IG_CODE = os.environ.get("IG_CODE", "").strip()
+IG_CODE_URL = os.environ.get("IG_CODE_URL", "").strip()
+CODE_WAIT_SEC = int(os.environ.get("CODE_WAIT_SEC", "600"))
+_CODE_USED = False  # the IG_CODE secret value is single-use per run
 DEADLINE = time.time() + int(os.environ.get("DEADLINE_SEC", "1440"))
 STATUS = {"status": "STARTED", "cold_start_total_ms": None, "fatal_count": 0,
           "steps": 0, "screenshots": [], "started_at": int(time.time()),
           "finished_at": None, "last_screen": None, "detail": "",
-          "code_destination_masked": None}
+          "code_destination_masked": None, "code_attempts": 0,
+          "code_source": None}
 
 
 def log(msg):
@@ -279,6 +307,92 @@ def extract_code_destination(nodes):
     return text[:200]
 
 
+def fetch_code(timeout_sec):
+    """Poll IG_CODE_URL until the body is exactly 6 digits, or time out.
+
+    The body is NEVER logged or stored — only its presence (6 digits) is
+    reported. Returns the code string, or None on timeout / deadline.
+    """
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if time.time() > DEADLINE:
+            return None
+        try:
+            req = urllib.request.Request(IG_CODE_URL, headers={
+                "User-Agent": "rdxgram-login-probe/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = resp.read().decode("utf-8", "replace").strip()
+            if re.fullmatch(r"\d{6}", body):
+                log("confirmation code arrived at mailbox (6 digits)")
+                return body
+        except Exception as e:
+            log(f"code poll: {type(e).__name__} (retrying)")
+        time.sleep(15)
+    return None
+
+
+def obtain_code():
+    """Get one 6-digit code, or None if none arrives in CODE_WAIT_SEC.
+
+    Source order: the IG_CODE env value (repo secret IG_LOGIN_CODE) first
+    — single-use, only if it was set before the run started; otherwise
+    poll IG_CODE_URL (repo secret IG_CODE_URL, a one-time mailbox file the
+    operator writes after the fresh login triggers a fresh code).
+    The code value itself is never logged. Returns (code, source).
+    """
+    global _CODE_USED
+    if IG_CODE and not _CODE_USED:
+        _CODE_USED = True
+        if re.fullmatch(r"\d{6}", IG_CODE):
+            log("using confirmation code from IG_CODE secret")
+            return IG_CODE, "secret"
+        log("IG_CODE secret is set but is not 6 digits; ignoring it")
+    if IG_CODE_URL:
+        code = fetch_code(CODE_WAIT_SEC)
+        if code:
+            return code, "url"
+        return None, None
+    return None, None
+
+
+def enter_code(nodes, code):
+    """Type a 6-digit code on the code screen and submit it.
+
+    Handles both layouts: a single code field (the one seen in run
+    43706519687), or six one-digit boxes. Returns the screen state after
+    submitting (re-dumped + classified). The code value is never logged.
+    """
+    eds = edits(nodes)
+    if not eds:
+        log("code screen has no input field")
+        return "CODE"
+    if len(eds) >= 6:
+        # Six one-digit boxes: one digit per box.
+        for i, digit in enumerate(code[:6]):
+            box = eds[i]
+            tap(*box["center"])
+            type_text(digit)
+    else:
+        field = eds[0]
+        clear_field(field["center"])
+        type_text(code)
+    log("code entered (6 digits, not shown); hiding keyboard")
+    dismiss_keyboard()
+    time.sleep(1)
+    nodes_sub = parse_dump(dump(f"step{STATUS['steps']:02d}c"))
+    btn = find_exact(nodes_sub, "Continue", "Confirm", "Verify")
+    if not btn:
+        btn = find(nodes_sub, "Continue", "Confirm", "Verify", "Next")
+    if not btn:
+        log("no Continue/Confirm button on code screen")
+        return "CODE"
+    log("tapping code submit button")
+    tap(*btn["center"])
+    time.sleep(10)
+    nodes_after = parse_dump(dump(f"step{STATUS['steps']:02d}d"))
+    return classify(nodes_after)
+
+
 def classify(nodes):
     t = low(nodes)
     descs = " ".join(n["desc"].lower() for n in nodes)
@@ -420,7 +534,8 @@ def main():
         save_status()
 
         if state == "FEED":
-            log("HOME FEED REACHED — login succeeded")
+            log("HOME FEED REACHED — login succeeded; letting it settle")
+            time.sleep(5)
             screenshot("shot_feed")
             home = find(nodes, "Search and explore")
             if home:
@@ -456,9 +571,50 @@ def main():
             STATUS["code_destination_masked"] = dest
             save_status()
             screenshot("shot_code_required")
-            return finish("CODE_REQUIRED",
-                          f"Instagram asked for a verification code. "
-                          f"Destination (as shown, masked): {dest}")
+            if not IG_CODE and not IG_CODE_URL:
+                return finish("CODE_REQUIRED",
+                              f"Instagram asked for a verification code, "
+                              f"but no code source is configured "
+                              f"(IG_CODE / IG_CODE_URL empty). "
+                              f"Destination (as shown, masked): {dest}")
+            # At most two code attempts: wait once more if the code
+            # never arrives or the entered code is rejected.
+            rejected = False
+            for attempt in (1, 2):
+                STATUS["code_attempts"] = attempt
+                save_status()
+                code, source = obtain_code()
+                if code is None:
+                    if attempt == 1:
+                        log("no code arrived; waiting once more "
+                            "(second and last wait)")
+                        continue
+                    return finish("CODE_TIMEOUT",
+                                  "no 6-digit code arrived after two "
+                                  f"waits ({CODE_WAIT_SEC}s each)" +
+                                  ("; the first code was rejected"
+                                   if rejected else ""))
+                STATUS["code_source"] = source
+                save_status()
+                log(f"code attempt {attempt} via {source}")
+                new_state = enter_code(nodes, code)
+                code = None  # never keep the value around
+                if new_state != "CODE":
+                    # Accepted (or a different screen): let the main
+                    # loop handle whatever Instagram shows next.
+                    log(f"after code submit: screen={new_state}")
+                    break
+                rejected = True
+                screenshot(f"shot_code_rejected_{attempt}")
+                if attempt == 1:
+                    log("code was rejected; waiting once more for a "
+                        "fresh code")
+                    nodes = parse_dump(dump(f"step{step:02d}e"))
+                    continue
+                return finish("CODE_REJECTED",
+                              "Instagram rejected the verification code "
+                              "twice")
+            continue
 
         if state == "CHALLENGE":
             screenshot("shot_challenge")

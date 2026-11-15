@@ -6,9 +6,15 @@
 # uses Hossein's own account (username + password from repo secrets
 # IG_LOGIN_USER / IG_LOGIN_PASS, temporary, deleted after the run).
 # The driver attempts ONE login submit. If the password is wrong it stops
-# at WRONG_PASSWORD; if Instagram asks for a verification code it stops
-# at CODE_REQUIRED and reports the masked destination — it never retries
-# the password and never guesses a code.
+# at WRONG_PASSWORD. If Instagram asks for a verification code, the driver
+# waits for it (up to two attempts): from repo secret IG_LOGIN_CODE if it
+# was set before dispatch, otherwise by polling repo secret IG_CODE_URL
+# (a one-time mailbox file the operator writes while the run waits).
+# No code within two waits -> CODE_TIMEOUT; code rejected twice ->
+# CODE_REJECTED. The code value is never printed or stored. The driver
+# never retries the password and never guesses a code. After a successful
+# login it lets the feed settle a few seconds, screenshots home / explore /
+# profile, and checks the log for FATAL crashes.
 #
 # Trigger: manual only (workflow_dispatch). Input apk_tag defaults to the
 # release under test (RdxGram side-by-side 1.5). Credentials come from
@@ -33,6 +39,10 @@ on:
         description: "Direct APK URL (overrides apk_tag)"
         required: false
         default: ""
+      code_wait_sec:
+        description: "Seconds to wait for the verification code, per attempt (max 2 attempts)"
+        required: false
+        default: "600"
 
 permissions:
   contents: read
@@ -292,7 +302,10 @@ jobs:
         env:
           IG_USER: ${{ secrets.IG_LOGIN_USER }}
           IG_PASS: ${{ secrets.IG_LOGIN_PASS }}
-          DEADLINE_SEC: "1440"
+          IG_CODE: ${{ secrets.IG_LOGIN_CODE }}
+          IG_CODE_URL: ${{ secrets.IG_CODE_URL }}
+          CODE_WAIT_SEC: ${{ inputs.code_wait_sec }}
+          DEADLINE_SEC: "1740"
         run: |
           export ANDROID_SERIAL=localhost:5555
           adb devices || true
