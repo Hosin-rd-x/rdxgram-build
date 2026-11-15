@@ -313,7 +313,7 @@ jobs:
                       break
               else:
                   print("NO_LOGIN_BUTTON_FOUND")
-              PY
+          PY
               cat tap.txt
               TAPXY=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap.txt | head -1 || true)
               if [ -n "$TAPXY" ]; then
@@ -354,7 +354,7 @@ jobs:
                         break
                 else:
                     print("NO_FORM_LOGIN_BUTTON")
-                PY
+          PY
                 cat tap2.txt
                 TAP2=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap2.txt | head -1 || true)
                 if [ -n "$TAP2" ]; then
