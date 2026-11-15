@@ -286,33 +286,42 @@ jobs:
               TAP_START=$(date +%s)
               echo "tap_start_epoch=$TAP_START" >> timing.txt
               python3 - <<'PY' > tap.txt 2>&1 || echo "TAP_PARSE_FAILED" >> tap.txt
-              import re, sys
-              try:
-                  xml = open("ui1.xml", encoding="utf-8", errors="replace").read()
-              except OSError as e:
-                  print("NO_UI1_XML", e); sys.exit(0)
-              # list every clickable node so the screen is visible even if no match
-              nodes = re.findall(r'<node[^>]*>', xml)
-              print(f"nodes={len(nodes)}")
-              for n in nodes:
-                  t = re.search(r'text="([^"]*)"', n)
-                  d = re.search(r'content-desc="([^"]*)"', n)
-                  c = re.search(r'clickable="(true|false)"', n)
-                  b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-                  cls = re.search(r'class="([^"]*)"', n)
-                  if (t and t.group(1)) or (d and d.group(1)):
-                      print(f"  clickable={c.group(1) if c else '?'} class={cls.group(1) if cls else '?'} text={t.group(1) if t else ''!r} desc={d.group(1) if d else ''!r} bounds={b.groups() if b else None}")
-              # the signed-out screen's button: text exactly "Log in"
-              for n in nodes:
-                  t = re.search(r'text="([^"]*)"', n)
-                  c = re.search(r'clickable="([^"]*)"', n)
-                  b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-                  if t and t.group(1) == "Log in" and c and c.group(1) == "true" and b:
-                      x1, y1, x2, y2 = map(int, b.groups())
-                      print(f"TAP {(x1+x2)//2} {(y1+y2)//2}")
-                      break
-              else:
-                  print("NO_LOGIN_BUTTON_FOUND")
+          import re, sys
+          try:
+            xml = open("ui1.xml", encoding="utf-8", errors="replace").read()
+          except OSError as e:
+            print("NO_UI1_XML", e); sys.exit(0)
+          # list every node with text so the screen is visible even if no match
+          nodes = re.findall(r'<node[^>]*>', xml)
+          print(f"nodes={len(nodes)}")
+          for n in nodes:
+            t = re.search(r'text="([^"]*)"', n)
+            d = re.search(r'content-desc="([^"]*)"', n)
+            c = re.search(r'clickable="(true|false)"', n)
+            b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
+            cls = re.search(r'class="([^"]*)"', n)
+            if (t and t.group(1)) or (d and d.group(1)):
+              print(f"  clickable={c.group(1) if c else '?'} class={cls.group(1) if cls else '?'} text={t.group(1) if t else ''!r} desc={d.group(1) if d else ''!r} bounds={b.groups() if b else None}")
+          # signed-out landing: no "Log in" button; login entry is "I already have a profile"
+          TARGETS = ["I already have a profile", "Log in"]
+          for want in TARGETS:
+            best = None
+            for n in nodes:
+              t = re.search(r'text="([^"]*)"', n)
+              c = re.search(r'clickable="([^"]*)"', n)
+              b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
+              if t and t.group(1) == want and b:
+                if c and c.group(1) == "true":
+                  best = b; break
+                if best is None:
+                  best = b
+            if best is not None:
+              x1, y1, x2, y2 = map(int, best.groups())
+              print(f"TARGET {want!r}")
+              print(f"TAP {(x1+x2)//2} {(y1+y2)//2}")
+              break
+          else:
+            print("NO_LOGIN_BUTTON_FOUND")
           PY
               cat tap.txt
               TAPXY=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap.txt | head -1 || true)
@@ -338,22 +347,40 @@ jobs:
                 echo "ALIVE_AFTER_LOGIN_TAP" | tee -a status.txt
                 # If a login form is now showing, tap its Log in button too (empty submit).
                 python3 - <<'PY' > tap2.txt 2>&1 || echo "TAP2_PARSE_FAILED" >> tap2.txt
-                import re, sys
-                try:
-                    xml = open("ui2.xml", encoding="utf-8", errors="replace").read()
-                except OSError as e:
-                    print("NO_UI2_XML", e); sys.exit(0)
-                nodes = re.findall(r'<node[^>]*>', xml)
-                for n in nodes:
-                    t = re.search(r'text="([^"]*)"', n)
-                    c = re.search(r'clickable="([^"]*)"', n)
-                    b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-                    if t and t.group(1) == "Log in" and c and c.group(1) == "true" and b:
-                        x1, y1, x2, y2 = map(int, b.groups())
-                        print(f"TAP {(x1+x2)//2} {(y1+y2)//2}")
-                        break
-                else:
-                    print("NO_FORM_LOGIN_BUTTON")
+          import re, sys
+          try:
+            xml = open("ui2.xml", encoding="utf-8", errors="replace").read()
+          except OSError as e:
+            print("NO_UI2_XML", e); sys.exit(0)
+          nodes = re.findall(r'<node[^>]*>', xml)
+          print(f"nodes={len(nodes)}")
+          for n in nodes:
+            t = re.search(r'text="([^"]*)"', n)
+            d = re.search(r'content-desc="([^"]*)"', n)
+            c = re.search(r'clickable="(true|false)"', n)
+            b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
+            cls = re.search(r'class="([^"]*)"', n)
+            if (t and t.group(1)) or (d and d.group(1)):
+              print(f"  clickable={c.group(1) if c else '?'} class={cls.group(1) if cls else '?'} text={t.group(1) if t else ''!r} desc={d.group(1) if d else ''!r} bounds={b.groups() if b else None}")
+          TARGETS = ["Log in", "Next"]
+          for want in TARGETS:
+            best = None
+            for n in nodes:
+              t = re.search(r'text="([^"]*)"', n)
+              c = re.search(r'clickable="([^"]*)"', n)
+              b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
+              if t and t.group(1) == want and b:
+                if c and c.group(1) == "true":
+                  best = b; break
+                if best is None:
+                  best = b
+            if best is not None:
+              x1, y1, x2, y2 = map(int, best.groups())
+              print(f"TARGET {want!r}")
+              print(f"TAP {(x1+x2)//2} {(y1+y2)//2}")
+              break
+          else:
+            print("NO_FORM_LOGIN_BUTTON")
           PY
                 cat tap2.txt
                 TAP2=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap2.txt | head -1 || true)
