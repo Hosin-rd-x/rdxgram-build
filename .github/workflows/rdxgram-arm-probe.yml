@@ -32,7 +32,7 @@ on:
       apk_tag:
         description: "Release tag of the already-built APK to test"
         required: true
-        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.6"
+        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.4"
       apk_url:
         description: "Direct APK URL (overrides apk_tag; used for baseline APKs not in a release, e.g. stock InstaPro)"
         required: false
@@ -40,7 +40,7 @@ on:
       tap_login:
         description: "Tap the Log in button after launch and capture a second logcat (true/false)"
         required: false
-        default: "true"
+        default: "false"
       tap_target:
         description: "Comma-separated first-tap targets in priority order (default: login entry points)"
         required: false
