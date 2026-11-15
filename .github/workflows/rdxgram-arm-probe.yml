@@ -41,6 +41,14 @@ on:
         description: "Tap the Log in button after launch and capture a second logcat (true/false)"
         required: false
         default: "false"
+      tap_target:
+        description: "Comma-separated first-tap targets in priority order (default: login entry points)"
+        required: false
+        default: "I already have a profile,Log in"
+      tap_fill:
+        description: "Fill dummy credentials and tap Log in to submit (true/false; false = just tap the first target and watch)"
+        required: false
+        default: "true"
 
 permissions:
   contents: read
@@ -294,7 +302,7 @@ jobs:
               adb pull /sdcard/ui1.xml ui1.xml 2>&1 | tail -1 || echo "UI1_PULL_FAILED" | tee -a timing.txt
               TAP_START=$(date +%s)
               echo "tap_start_epoch=$TAP_START" >> timing.txt
-              python3 .github/scripts/tap_parse.py ui1.xml "I already have a profile,Log in" > tap.txt 2>&1 || echo "TAP_PARSE_FAILED" >> tap.txt
+              python3 .github/scripts/tap_parse.py ui1.xml "${{ inputs.tap_target }}" > tap.txt 2>&1 || echo "TAP_PARSE_FAILED" >> tap.txt
               cat tap.txt
               TAPXY=$(grep -oE '^TAP [0-9]+ [0-9]+$' tap.txt | head -1 || true)
               if [ -n "$TAPXY" ]; then
@@ -302,6 +310,7 @@ jobs:
                 echo "tapping first target at $2 $3" | tee -a timing.txt
                 adb shell input tap "$2" "$3" || echo "TAP_FAILED" | tee -a timing.txt
                 sleep 3
+              if [ "${{ inputs.tap_fill }}" = "true" ]; then
                 # If a login form is now showing, fill dummy credentials so the
                 # submit actually runs the login attempt (empty-form submit
                 # only shows inline validation and never reaches the crash
@@ -339,6 +348,7 @@ jobs:
                 else
                   echo "no Log in button to submit (see ui1b/ui1c)" | tee -a timing.txt
                 fi
+              fi
               else
                 echo "no first target to tap (see ui1.xml / tap.txt)" | tee -a timing.txt
               fi
