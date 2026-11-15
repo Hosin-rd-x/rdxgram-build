@@ -4,7 +4,7 @@
 # Why: the login-tap crash on Hossein's phone never reproduced with fake
 # credentials; only a real account reaches the post-login screens. This run
 # uses Hossein's own account (username + password from repo secrets
-# IG_LOGIN_USER / IG_LOGIN_PASS, temporary, deleted after the run).
+# IG_LOGIN_USER / IG_LOGIN_PASS, PERSISTENT - never delete them).
 # The driver attempts ONE login submit. If the password is wrong it stops
 # at WRONG_PASSWORD. If Instagram asks for a verification code, the driver
 # waits for it (up to two attempts): from repo secret IG_LOGIN_CODE if it
@@ -17,7 +17,7 @@
 # profile, and checks the log for FATAL crashes.
 #
 # Trigger: manual only (workflow_dispatch). Input apk_tag defaults to the
-# release under test (RdxGram side-by-side 1.5). Credentials come from
+# release under test (RdxGram side-by-side 1.6). Credentials come from
 # repo secrets and are never printed: the driver logs only masked events.
 #
 # The boot/install/launch steps are the same as rdxgram-signup-probe.yml,
@@ -34,7 +34,7 @@ on:
       apk_tag:
         description: "Release tag of the already-built APK to test"
         required: true
-        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.5"
+        default: "instagram-451.0.0.53.80-rdxgram-sidebyside-1.6"
       apk_url:
         description: "Direct APK URL (overrides apk_tag)"
         required: false
