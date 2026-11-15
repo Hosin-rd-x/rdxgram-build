@@ -300,15 +300,21 @@ def classify(nodes):
     if any(k in t for k in ("confirmation code", "enter the code",
                             "enter code", "6-digit", "verification code")):
         return "CODE"
-    # Phone screen BEFORE the email screen: its "Sign up with email"
-    # link contains the word "email" and its phone field is an EditText.
-    if "sign up with email" in t or "sign up with email address" in t:
+    # Title-first: the email screen's toggle link says "Sign up with
+    # mobile number" and the phone screen's says "Sign up with email" —
+    # matching on those links (or on "mobile number" alone) misclassifies
+    # the screen. Seen in run 43681035195: the email screen was read as
+    # PHONE_OR_EMAIL because of its "Sign up with mobile number" link.
+    if "what's your email" in t or "enter your email" in t:
+        return "EMAIL"
+    if "what's your mobile number" in t or "what's your phone number" in t:
         return "PHONE_OR_EMAIL"
+    if "sign up with email" in t:
+        return "PHONE_OR_EMAIL"
+    if "email address" in t or "your email" in t:
+        return "EMAIL"
     if any(k in t for k in ("mobile number", "phone number")):
         return "PHONE_OR_EMAIL"
-    if any(k in t for k in ("email address", "what's your email",
-                            "enter your email", "your email")):
-        return "EMAIL"
     if any(k in t for k in ("create a password", "choose a password",
                             "set a password")) or (
             "password" in t and find_edit(nodes)):
