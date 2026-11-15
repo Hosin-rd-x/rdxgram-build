@@ -247,7 +247,8 @@ jobs:
           grep -q '<dimen name="direct_in_thread_composer_top_margin">6dp</dimen>' ig-decoded/res/values/rdx_split_dimens.xml || (echo "SPLIT_DIMEN_MARGIN_MISSING" && exit 1)
           echo "split repairs present: tabBarHeight -> tab_bar_height_panorama 48dp, strokeWidth -> circular_avatar_stroke_width 2px, mediaViewOuterVerticalMargin -> direct_in_thread_composer_top_margin 6dp x2"
           echo "split sweep 2k (Play-split XML drawables) in rebrand.log:"
-          grep -q '2k total: 119 drawables, 2 xml stubs, 2 dimens, 131 xml files fixed' rebrand.log || (echo "SPLIT_2K_TOTAL_WRONG" && exit 1)
+          grep -q '2k total: 138 drawables, 8 xml stubs, 2 dimens, 131 xml files fixed' rebrand.log || (echo "SPLIT_2K_TOTAL_WRONG" && exit 1)
+          grep -q '2k restore drawable dialog_x -> 0x7f08053d' rebrand.log || (echo "SPLIT_2K_DIALOG_X_MISSING" && exit 1)
           grep -q '2k restore drawable input -> 0x7f082185' rebrand.log || (echo "SPLIT_2K_INPUT_MISSING" && exit 1)
           grep -q '2k restore drawable input_highlighted -> 0x7f082188' rebrand.log || (echo "SPLIT_2K_INPUT_HIGHLIGHTED_MISSING" && exit 1)
           grep -q '2k xml fix res/drawable/input_background.xml: 2 replacements (0 left @null)' rebrand.log || (echo "SPLIT_2K_INPUT_BACKGROUND_XML_MISSING" && exit 1)
