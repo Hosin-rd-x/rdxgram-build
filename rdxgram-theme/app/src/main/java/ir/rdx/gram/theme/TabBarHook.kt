@@ -60,13 +60,13 @@ import java.util.WeakHashMap
  * If a Compose view ever covers the bar, the capsule is hidden behind it;
  * that case is logged and only a phone test can settle it.
  *
- * 1.16 adds ONLY DragLensHook, in the same spirit and the same file's
- * sweep path: a full drag animation between tabs — a transparent
- * overlay over the bar, an 8dp tap-vs-drag threshold, a glass lens
- * pill following the finger, snap to the nearest tab on release with
- * a ValueAnimator + OvershootInterpolator settle. Taps and long-press
- * pass through untouched. The 1.15 probe cleared FullScreenHook, so
- * the drag lens is the last suspect for the empty tab bar in 1.13.
+ * 1.17 fixes ONLY how DragLensHook attaches: the drag overlay now
+ * lives on the window decor, positioned over the bar — never as a
+ * child of the bar. The 1.13/1.16 bisect proved the old attach (the
+ * overlay as the bar's 6th child) made Instagram's bar controller
+ * drop the tabs; the decor is outside that controller's reach. The
+ * 1.15 probe cleared FullScreenHook, and the 1.16 re-probe proved
+ * DragLensHook was the trigger, so this is the last suspect to fix.
  * The 1.11 capsule fix (TAG_CAPSULE_DRAWABLE identity check) is intact
  * and still the only thing standing between the capsule and Instagram's
  * own tab-bar controller replacing its background with a flat colour.
@@ -171,7 +171,8 @@ object TabBarHook {
                         apply(cached)
                     }
                     // Re-arm the drag overlay if Instagram rebuilt the
-                    // bar's children and dropped it (cheap no-op when present).
+                    // bar (cheap no-op when present — re-syncs its
+                    // position over the bar).
                     DragLensHook.attach(cached)
                 }
                 if (!Settings.isBarEnabled(a) && styledBars.isEmpty()) return@addOnGlobalLayoutListener

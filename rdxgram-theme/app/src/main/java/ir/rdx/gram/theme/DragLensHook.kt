@@ -7,29 +7,47 @@ import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
+import java.lang.ref.WeakReference
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Full drag animation between tabs for RdxGram 1.13 (the "drag lens").
+ * Full drag animation between tabs for RdxGram (the "drag lens").
+ * 1.17: the overlay attaches to the window decor, never inside the bar —
+ * the 1.13/1.16 bisect proved the bar-child attach emptied the tab bar.
+ * See the attach() doc below.
  *
  * Stock Instagram 451 has NO drag on the tab bar — tabs only switch on
  * tap. This builds it in the theme module, on top of the capsule:
  *
- *  - a transparent overlay sits over the bar (a child of the bar itself,
- *    so it always covers exactly the bar's bounds and draws above the
- *    tabs). It is a ViewGroup that does NOT intercept on DOWN — the tap
- *    reaches the tab underneath normally, so plain taps, press states
- *    and long-press all behave exactly as stock. Only once the finger
- *    has moved horizontally past an 8dp threshold (and further sideways
- *    than vertically) does it intercept; the framework then sends the
- *    tab an ACTION_CANCEL, and the drag belongs to the overlay.
+ *  - a transparent overlay sits over the bar — but NOT as a child of the
+ *    bar. It is attached to the activity window's decor view (a
+ *    FrameLayout by construction), positioned exactly over the bar's
+ *    bounds, so it always covers exactly the bar and draws above the
+ *    tabs. This is the 1.17 fix: in 1.13/1.16 the overlay was a child
+ *    of the bar itself (bar.addView, the 6th child), and the bisect
+ *    proved Instagram's bar controller drops/rebuilds the tabs when a
+ *    foreign child appears inside the bar — the bar came up with
+ *    exactly one empty child and all five tabs gone. The decor is
+ *    outside the bar controller's reach: it never rebuilds the decor's
+ *    children, and attaching a view there (the same class of operation
+ *    as FullScreenHook's window work, cleared by the 1.15 probe) leaves
+ *    the bar's children untouched. It is a ViewGroup that does NOT
+ *    intercept on DOWN — the tap reaches the tab underneath normally,
+ *    so plain taps, press states and long-press all behave exactly as
+ *    stock. Only once the finger has moved horizontally past an 8dp
+ *    threshold (and further sideways than vertically) does it
+ *    intercept; the framework then sends the tab an ACTION_CANCEL, and
+ *    the drag belongs to the overlay. Because the overlay covers the
+ *    bar exactly, its touch coordinates ARE the bar's coordinates, so
+ *    tab lookup needs no conversion.
  *  - while dragging, a glass lens pill follows the finger's x (with a
  *    small stretch, up to ~12%, the further it is pulled from where
  *    the drag started);
@@ -48,12 +66,26 @@ import kotlin.math.min
  * to distinct centres. If a drag target cannot be resolved at release
  * time, nothing is clicked and the lens just hides — the worst case is
  * a drag that does nothing, never a dead tab bar. Everything is
- * try/catch-guarded; if the overlay is ever dropped (Instagram rebuilds
- * the bar's children as you navigate) TabBarHook.apply() re-attaches it.
+ * try/catch-guarded. The hook owns exactly one overlay at a time
+ * (attachedOverlay): when Instagram rebuilds the bar, the next attach
+ * retires the overlay that points at the dead bar before arming a new
+ * one — the old design got this for free because the overlay died with
+ * its parent bar, but a decor overlay outlives the bar, so the
+ * retirement must be explicit. TabBarHook.apply() re-attaches on every
+ * layout pass, which also re-syncs the overlay's position if the bar
+ * moved or resized.
  */
 object DragLensHook {
 
     private const val TAG_DRAG_OVERLAY = 0x7e1e0312
+
+    // The overlay lives on the window decor, NOT inside the bar (1.17 —
+    // see the class doc). Exactly one overlay is owned at a time: a
+    // decor overlay outlives the bar it covers, so when Instagram
+    // rebuilds the bar the next attach() must retire the stale one
+    // explicitly, or drags would keep clicking the dead bar's tabs.
+    private var attachedOverlay: DragOverlay? = null
+    private var attachedBarRef: WeakReference<ViewGroup>? = null
 
     // Tap vs drag: below this horizontal move it is still a tap.
     private const val DRAG_THRESHOLD_DP = 8
@@ -68,22 +100,74 @@ object DragLensHook {
         "direct_tab", "news_tab", "profile_tab"
     )
 
-    /** Attach the drag overlay to a styled bar. Idempotent. */
+    /** Attach the drag overlay over a styled bar. Idempotent. */
     fun attach(bar: ViewGroup) {
         try {
-            val existing = bar.getTag(TAG_DRAG_OVERLAY) as? DragOverlay
-            if (existing != null && existing.parent === bar) return
+            // Same bar, overlay still on the decor: just re-sync its
+            // bounds — the bar moves/resizes as you navigate.
+            val existing = attachedOverlay
+            if (existing != null && attachedBarRef?.get() === bar && existing.parent != null) {
+                positionOverlay(existing, bar)
+                return
+            }
+            // Different bar (Instagram rebuilt it), or the overlay was
+            // dropped: retire the stale one before arming a new one.
+            retireOverlay()
             if (tabCenters(bar).size < 2) return // cannot resolve targets: leave taps alone
+            if (bar.width <= 0 || bar.height <= 0) return // not laid out yet
+            // The decor is the window root (a FrameLayout by
+            // construction); absolute positioning via margins is safe
+            // there and never disturbs the content layout. rootView is
+            // the bar itself while it is not attached to a window yet.
+            val decor = bar.rootView as? ViewGroup ?: return
+            if (decor === bar) return
             val overlay = DragOverlay(bar)
-            overlay.layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
             overlay.isClickable = false
             overlay.isFocusable = false
             overlay.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            bar.addView(overlay)
+            positionOverlay(overlay, bar)
+            decor.addView(overlay)
+            attachedOverlay = overlay
+            attachedBarRef = WeakReference(bar)
             bar.setTag(TAG_DRAG_OVERLAY, overlay)
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /**
+     * Place [overlay] exactly over [bar]'s bounds, in decor coordinates.
+     * The overlay's touch coordinates are then the bar's coordinates, so
+     * no conversion is needed anywhere else. No-op when the bar is not
+     * laid out yet — the next layout pass re-arms and re-syncs.
+     */
+    private fun positionOverlay(overlay: DragOverlay, bar: ViewGroup) {
+        try {
+            val w = bar.width
+            val h = bar.height
+            if (w <= 0 || h <= 0) return
+            val decor = overlay.parent as? ViewGroup ?: bar.rootView as? ViewGroup ?: return
+            val barLoc = IntArray(2)
+            val decorLoc = IntArray(2)
+            bar.getLocationInWindow(barLoc)
+            decor.getLocationInWindow(decorLoc)
+            val lp = FrameLayout.LayoutParams(w, h)
+            lp.gravity = Gravity.TOP or Gravity.START
+            lp.leftMargin = barLoc[0] - decorLoc[0]
+            lp.topMargin = barLoc[1] - decorLoc[1]
+            overlay.layoutParams = lp
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /** Remove the owned overlay from wherever it is attached. */
+    private fun retireOverlay() {
+        try {
+            val overlay = attachedOverlay ?: return
+            attachedOverlay = null
+            val oldBar = attachedBarRef?.get()
+            attachedBarRef = null
+            (overlay.parent as? ViewGroup)?.removeView(overlay)
+            oldBar?.setTag(TAG_DRAG_OVERLAY, null)
         } catch (ignored: Throwable) {
         }
     }
@@ -91,6 +175,13 @@ object DragLensHook {
     /** Remove the overlay (called from TabBarHook.restore()). */
     fun detach(bar: ViewGroup) {
         try {
+            // The owned overlay belongs to this bar: retire it.
+            if (attachedBarRef?.get() === bar) {
+                retireOverlay()
+                return
+            }
+            // Fallback: an overlay tagged on this bar but not owned
+            // (e.g. armed before a process restart) — remove it too.
             val overlay = bar.getTag(TAG_DRAG_OVERLAY) as? View ?: return
             (overlay.parent as? ViewGroup)?.removeView(overlay)
             bar.setTag(TAG_DRAG_OVERLAY, null)
