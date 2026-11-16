@@ -77,6 +77,19 @@ centers the same way, and reports DRAG_UNKNOWN_DUMP_FAILED (with
 the mid/after screenshots as evidence) when the after-dump cannot
 confirm the switch, instead of silently skipping.
 
+1.17.1 probe: after SAVE_LOGIN Instagram showed a first-run
+"Set up on new device" location-services onboarding (no Skip /
+Not now — only a "Continue" button) instead of the feed, and the
+driver had no handler for it, so it died on UNKNOWN_SCREEN at
+step 4. The screen is now a first-class screen
+(ONBOARDING_LOCATION): BACK first (it may skip the onboarding
+without granting location), then Continue + DENY the Android
+system location dialog ("Don't allow", verified — never "While
+using the app" / "Only this time"). Both steps are verified with
+fresh dumps, at most 2 attempts, and a relaunch after BACK is
+gated on a SUCCEEDED dump showing the app is gone (the same rule
+as the tap loop — never a blind relaunch).
+
 After a successful login Android may also show the system
 notification-permission dialog ("Allow Rdx gram to send you
 notifications?"). The driver dismisses it with "Don't allow" so it can
@@ -464,6 +477,130 @@ def dismiss_notif(nodes, tag):
     return None, nodes
 
 
+def dismiss_location_permission(nodes, tag):
+    """Deny the Android system location-permission dialog, VERIFIED.
+
+    Same pattern as dismiss_notif (tap, settle, fresh dump, at most
+    2 taps) — never tap "While using the app" or "Only this time":
+    the probe must not grant location. Returns (state, nodes) after
+    denial, or (None, nodes) if the dialog is still up after 2
+    verified taps."""
+    for attempt in (1, 2):
+        btn = find_exact(nodes, "Don't allow", "Don’t allow") or \
+            find(nodes, "Don't allow")
+        if not btn:
+            return None, nodes
+        log(f"location-permission dialog; tapping Don't allow "
+            f"(attempt {attempt}/2, verified)")
+        tap(*btn["center"])
+        time.sleep(5)
+        nodes = parse_dump(dump(f"{tag}n{attempt}"))
+        state = classify(nodes)
+        if state != "LOCATION_PERMISSION":
+            log(f"location dialog denied after {attempt} "
+                f"tap(s); now on {state}")
+            return state, nodes
+        log(f"location dialog still present after tap "
+            f"{attempt}/2; verifying with a fresh dump before retrying")
+    return None, nodes
+
+
+def exit_onboarding_location(nodes, tag):
+    """Leave the first-run "Set up on new device" location
+    onboarding and get to the feed (or whatever Instagram shows
+    next).
+
+    1.17.1 probe: Instagram showed this screen after SAVE_LOGIN
+    instead of the feed, and the driver had no handler for it — it
+    died on UNKNOWN_SCREEN at step 4. The screen has no Skip /
+    Not now affordance; its only clickable node is "Continue"
+    (which triggers the Android location-permission dialog).
+    Recovery order, max 2 attempts:
+      (a) BACK key first — it may skip the onboarding WITHOUT
+          granting location. Verified with a fresh dump.
+      (b) If still on the onboarding, tap "Continue" and DENY the
+          system location dialog ("Don't allow", verified — never
+          "While using the app" / "Only this time"). Verified with
+          a fresh dump.
+    If BACK leaves the app entirely (launcher), the relaunch is
+    gated on a SUCCEEDED dump showing the app is gone — the same
+    rule as the tap loop — never a blind relaunch. BACK is never
+    pressed on the feed itself: this handler only runs while the
+    current screen IS the onboarding, and every press is verified
+    by a fresh dump before the next one.
+    Returns (state, nodes): the fresh classified state after
+    recovery, or ("ONBOARDING_LOCATION", nodes) if still stuck.
+    A success is recorded in status.json (onboarding_recoveries)."""
+    state = "ONBOARDING_LOCATION"
+    # Attempt 1: BACK — skip without granting location.
+    log("location onboarding; BACK key first (attempt 1/2)")
+    keyevent(4)
+    time.sleep(3)
+    nodes = parse_dump(dump(f"{tag}b1"))
+    if nodes:
+        state = classify(nodes)
+        if state != "ONBOARDING_LOCATION" and not app_foreground(nodes):
+            # BACK left the app (launcher): relaunch once, gated on
+            # this SUCCEEDED dump.
+            log("BACK left the app; relaunching once")
+            relaunch()
+            time.sleep(5)
+            nodes = parse_dump(dump(f"{tag}re"))
+            if nodes:
+                state = classify(nodes)
+        if state != "ONBOARDING_LOCATION":
+            STATUS.setdefault("onboarding_recoveries", []).append(
+                {"screen": "ONBOARDING_LOCATION", "tag": tag,
+                 "method": "back", "attempts": 1})
+            save_status()
+            log(f"onboarding cleared by BACK; now on {state}")
+            return state, nodes
+    else:
+        # No fresh hierarchy after BACK: wait and re-dump once
+        # instead of acting blindly.
+        log("no UI dump after BACK on onboarding; waiting and "
+            "re-dumping once")
+        time.sleep(3)
+        nodes = parse_dump(dump(f"{tag}b1r"))
+        if nodes:
+            state = classify(nodes)
+            if state != "ONBOARDING_LOCATION":
+                STATUS.setdefault("onboarding_recoveries", []).append(
+                    {"screen": "ONBOARDING_LOCATION", "tag": tag,
+                     "method": "back", "attempts": 1})
+                save_status()
+                log(f"onboarding cleared by BACK; now on {state}")
+                return state, nodes
+    # Attempt 2: Continue, then DENY the system location dialog.
+    log("onboarding still up after BACK; tapping Continue "
+        "(attempt 2/2)")
+    btn = find_exact(nodes, "Continue") if nodes else None
+    if not btn:
+        log("onboarding has no Continue button; giving up")
+        return "ONBOARDING_LOCATION", nodes
+    tap(*btn["center"])
+    time.sleep(3)
+    nodes = parse_dump(dump(f"{tag}c2"))
+    state = classify(nodes) if nodes else "ONBOARDING_LOCATION"
+    saw_perm = False
+    if state == "LOCATION_PERMISSION":
+        saw_perm = True
+        new_state, nodes = dismiss_location_permission(nodes,
+                                                      f"{tag}perm")
+        if new_state is not None:
+            state = new_state
+    if nodes and state != "ONBOARDING_LOCATION":
+        STATUS.setdefault("onboarding_recoveries", []).append(
+            {"screen": "ONBOARDING_LOCATION", "tag": tag,
+             "method": "continue+deny" if saw_perm else "continue",
+             "attempts": 2})
+        save_status()
+        log(f"onboarding cleared by Continue + deny; now on {state}")
+        return state, nodes
+    log("onboarding still up after Continue + deny")
+    return "ONBOARDING_LOCATION", nodes
+
+
 def find_edit(nodes, *desc_prefixes):
     for n in nodes:
         if n["cls"].endswith("EditText"):
@@ -651,6 +788,22 @@ def classify(nodes):
                             "the password you entered is incorrect",
                             "wrong password")):
         return "WRONG_PASSWORD"
+    # First-run "Set up on new device" location onboarding (1.17.1
+    # probe): shown after SAVE_LOGIN instead of the feed. Checked
+    # FIRST (before FEED/NOTIF) — the screen is unmistakable and
+    # must never be mistaken for the feed or the notification
+    # dialog.
+    if "set up on new device" in t:
+        return "ONBOARDING_LOCATION"
+    # Android system location-permission dialog (appears after
+    # tapping Continue on the onboarding): "Allow Rdx gram to access
+    # this device's location?" with While using the app / Only this
+    # time / Don't allow. Checked after ONBOARDING_LOCATION on
+    # purpose — the onboarding screen itself says "access your
+    # location", which must not match here.
+    if ("access this device's location" in t
+            or "while using the app" in t):
+        return "LOCATION_PERMISSION"
     # System notification-permission dialog can overlay the feed, so
     # it must win over the FEED nav check below.
     if "send you notifications" in t:
@@ -1348,6 +1501,35 @@ def main():
                               "after 2 verified taps)")
             # Dismissed (or the screen changed): the next loop
             # iteration classifies the fresh screen.
+            continue
+
+        if state == "ONBOARDING_LOCATION":
+            # First-run "Set up on new device" location onboarding
+            # (1.17.1 probe): BACK first, then Continue + deny the
+            # system dialog — verified at every step, max 2 attempts
+            # per call. On success the next loop iteration classifies
+            # the fresh screen.
+            rec_state, _ = exit_onboarding_location(
+                nodes, f"step{step:02d}onb")
+            if rec_state not in (None, "ONBOARDING_LOCATION"):
+                continue
+            # Still on the onboarding: loop re-classifies; the
+            # same-state guard above finishes STUCK_ONBOARDING_LOCATION
+            # after 6 identical steps.
+            continue
+
+        if state == "LOCATION_PERMISSION":
+            # System location dialog outside the onboarding flow
+            # (should not happen — the onboarding handler denies it
+            # inline — but never grant it anywhere).
+            new_state, nodes = dismiss_location_permission(
+                nodes, f"step{step:02d}")
+            if new_state is None:
+                screenshot("shot_location_dialog")
+                return finish("STUCK_LOCATION_PERMISSION",
+                              "system location-permission dialog could "
+                              "not be denied (no button, or still up "
+                              "after 2 verified taps)")
             continue
 
         if state in ("FIND_PEOPLE", "INTERSTITIAL", "PHOTO"):
