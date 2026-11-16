@@ -456,17 +456,21 @@ def main():
         # Keep the label name for step 3 (strings.xml value patch).
         _label_name_for_strings = label_name
 
-        # 2h. (1.10) Software rendering: force
-        # android:hardwareAccelerated="false" on the <application> tag.
-        # Evidence: on Redroid 13/14/15 the feed renders, then the
-        # app's RenderThread dies ~6 s later while the feed's first
-        # video starts — SIGSEGV in DeferredLayerUpdater::apply (13)
-        # or SIGABRT "Invalid GrBackendTexture" after Skia "Could not
-        # create EGL image, err = (0x300c)" (14/15). Redroid's
-        # software GL cannot provide the EGL image / layer buffer the
-        # GPU layer path needs. With HW acceleration off, the app's
-        # windows render through the software rasterizer instead, so
-        # the feed no longer depends on that broken path. Only the
+        # 2h. (1.12) Hardware acceleration BACK ON: force
+        # android:hardwareAccelerated="true" on the <application> tag.
+        # (1.10) had forced it to false: on Redroid 13/14/15 the feed
+        # renders, then the app's RenderThread dies ~6 s later while
+        # the feed's first video starts — SIGSEGV in
+        # DeferredLayerUpdater::apply (13) or SIGABRT "Invalid
+        # GrBackendTexture" after Skia "Could not create EGL image,
+        # err = (0x300c)" (14/15). Redroid's software GL cannot provide
+        # the EGL image / layer buffer the GPU layer path needs. With
+        # HW acceleration off, the app's windows render through the
+        # software rasterizer instead, so the feed no longer depends on
+        # that broken path — but cold start is ~3.9 s and scrolling
+        # lags. 1.12 re-enables HW acceleration to test whether the
+        # crash returns: if it was environmental (Redroid's broken
+        # software GL), HW-on may now be clean AND smooth. Only the
         # <application> tag is touched: feed activities (MainTab /
         # InstagramMain) carry no explicit attribute and inherit it.
         # The three explicit per-activity values are left alone
@@ -478,10 +482,10 @@ def main():
             print("APPLICATION_TAG_NOT_FOUND")
             return 1
         _app_tag = _app_m.group(0)
-        if 'android:hardwareAccelerated="true"' in _app_tag:
+        if 'android:hardwareAccelerated="false"' in _app_tag:
             _new_app_tag = _app_tag.replace(
-                'android:hardwareAccelerated="true"',
                 'android:hardwareAccelerated="false"',
+                'android:hardwareAccelerated="true"',
                 1,
             )
             manifest = (
@@ -490,11 +494,11 @@ def main():
                 + manifest[_app_m.end():]
             )
             changes.append(
-                "application hardwareAccelerated true -> false (1.10)"
+                "application hardwareAccelerated false -> true (1.12)"
             )
         elif 'android:hardwareAccelerated=' not in _app_tag:
             _new_app_tag = _app_tag[:-1] + (
-                ' android:hardwareAccelerated="false">'
+                ' android:hardwareAccelerated="true">'
             )
             manifest = (
                 manifest[: _app_m.start()]
@@ -502,11 +506,11 @@ def main():
                 + manifest[_app_m.end():]
             )
             changes.append(
-                "application hardwareAccelerated inserted false (1.10)"
+                "application hardwareAccelerated inserted true (1.12)"
             )
         else:
             changes.append(
-                "application hardwareAccelerated already false (1.10)"
+                "application hardwareAccelerated already true (1.12)"
             )
 
         with open(manifest_path, "w", encoding="utf-8") as fh:
