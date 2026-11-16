@@ -59,6 +59,24 @@ a stale file; the main loop waits and retries the step instead of
 acting. The notification dialog is now dismissed with verification
 (tap, settle 5 s, fresh dump) and at most 2 taps.
 
+1.17 re-probe 3: after tap 2 (Reels) EVERY dump() returned None —
+uiautomator times out while the reels video SurfaceView is active —
+so find_tab could never see the bar again even though every
+screenshot showed it healthy with all 5 icons, and the old tap loop
+burned ~4 min per failed tap (2 in-place re-dumps + a sheet dismissal
+that was not there + a futile relaunch, each failing dump ~40 s).
+The tap loop now has a dump-failure path: tap the wanted tab at its
+LAST-KNOWN coordinates (remember_tabs, from the last dump that had
+the bar), and if dumps still fail press the BACK key EXACTLY ONCE
+to leave the Reels tab for the feed; each tap is capped at
+TAP_BUDGET_SEC so a failure can never burn 4 min again. The relaunch
+path is gated on a SUCCEEDED dump showing the app is gone —
+app_foreground([]) is False, but that means "no dump", not "left
+the app". The drag test falls back to the last-known Home/Reels
+centers the same way, and reports DRAG_UNKNOWN_DUMP_FAILED (with
+the mid/after screenshots as evidence) when the after-dump cannot
+confirm the switch, instead of silently skipping.
+
 After a successful login Android may also show the system
 notification-permission dialog ("Allow Rdx gram to send you
 notifications?"). The driver dismisses it with "Don't allow" so it can
@@ -94,6 +112,20 @@ STATUS = {"status": "STARTED", "cold_start_total_ms": None, "fatal_count": 0,
           "finished_at": None, "last_screen": None, "detail": "",
           "code_destination_masked": None, "code_attempts": 0,
           "code_source": None}
+# Bottom-bar tab descs, and their centers from the last dump that had
+# them (see remember_tabs). 1.17 re-probe 3: dumps fail while the
+# reels video SurfaceView is active, so the last-known centers are
+# the only way to keep tapping when find_tab can no longer see the bar.
+TAB_DESCS = ("Home", "Reels", "Message", "Search and explore", "Profile")
+LAST_TABS = {}  # desc -> (x, y)
+# Name of the last tab actually tapped in the 8-tap sequence (None
+# before tap 1). The dump-failure BACK below is only safe when the
+# previous tap was Reels: BACK from the Reels tab returns to the
+# feed, but BACK on the home feed would exit the app to the launcher.
+LAST_TAP_NAME = None
+# Per-tap time cap in the 8-tap sequence (re-probe 3: one failed tap
+# burned ~4 min). No new expensive step starts once it is spent.
+TAP_BUDGET_SEC = 120
 
 
 def log(msg):
@@ -292,6 +324,25 @@ def find_tab(nodes, desc):
         if n["desc"].strip() == desc and n["center"][1] >= bar_top:
             return n
     return None
+
+
+def remember_tabs(nodes):
+    """Remember the bottom-bar tab centers from a dump that has them.
+
+    Re-probe 3: after tap 2 (Reels) every uiautomator dump returned
+    None while the reels video SurfaceView was active, so find_tab
+    could never see the bar again — even though every screenshot
+    showed it healthy with all 5 icons. The last-known centers are
+    the fallback: tapping them navigates off the Reels tab to a
+    static screen where dumps work again. Only real, clickable,
+    bottom-bar tabs are remembered (find_tab's exact-desc + bar
+    check), and only from dumps that actually have them — an
+    empty-bar dump (1.13/1.16 regression) remembers nothing, and a
+    failed dump (nodes == []) remembers nothing either."""
+    for desc in TAB_DESCS:
+        node = find_tab(nodes, desc)
+        if node:
+            LAST_TABS[desc] = node["center"]
 
 
 def app_foreground(nodes):
@@ -686,6 +737,289 @@ def tap_next(nodes):
     return False
 
 
+def tap_sequence_tab(i, name, desc):
+    """One tap of the 8-tap acceptance sequence. Returns
+    (nodes_after, crashed): nodes_after is the dump after the tap
+    (possibly []), crashed is True if the process died mid-tap.
+
+    Re-probe 3 dump-failure path: when the UI dump itself fails
+    (uiautomator times out while the reels video SurfaceView is
+    active), the old code re-dumped in place twice, dismissed a
+    sheet that was not there, and relaunched — each failing dump
+    costs ~40 s, so one tap burned ~4 min and all 6 remaining taps
+    did the same. New behaviour, in order:
+      1. Dumps SUCCEED but the tab is not found: the old in-place
+         re-dump + sheet-dismiss path (bar settling), time-boxed.
+      2. Dumps FAIL (nodes empty): tap the wanted tab at its
+         LAST-KNOWN coordinates (remember_tabs) — the bar is
+         visibly present in the screenshots, and the tap navigates
+         off the Reels tab to a static screen where dumps work
+         again. Recorded in status.json (dump_fallback_taps).
+      3. Still no dump after the fallback tap: press the BACK key
+         EXACTLY ONCE (from the Reels tab BACK returns to the feed;
+         never on the feed itself — this branch only runs when no
+         dump has succeeded since the Reels tab AND the previous
+         tap was Reels, so the current screen is the Reels tab and
+         not the feed) and re-dump once.
+         If the screen after BACK has the bar, the fallback tap's
+         navigation was undone by the BACK, so the tab is tapped
+         again for real below. Recorded in status.json
+         (back_recoveries). The old exit_viewer() is NOT reused
+         here: it presses BACK up to 3 times, and a second BACK
+         from the feed would exit the app to the launcher.
+      4. Per-tap budget TAP_BUDGET_SEC: no new expensive step starts
+         once the budget is spent — record the failure and move on.
+    The relaunch path is gated on a SUCCEEDED dump showing the app
+    is gone: app_foreground([]) is False, but that means "no dump",
+    not "left the app" — the old code relaunched on empty nodes
+    (futile: relaunch just brings the same Reels task forward)."""
+    global LAST_TAP_NAME
+    tap_started = time.time()
+    # The tab tapped by the PREVIOUS sequence tap: the dump-failure
+    # BACK below is only safe when it was Reels (BACK from the Reels
+    # tab returns to the feed; BACK on the home feed exits the app).
+    # Captured before this tap sets LAST_TAP_NAME to its own name.
+    prev_tap = LAST_TAP_NAME
+    tapped = False
+    nodes_cur = parse_dump(dump(f"step_tab{i:02d}"))
+    if nodes_cur:
+        remember_tabs(nodes_cur)
+    tab = find_tab(nodes_cur, desc)
+    if not tab and nodes_cur:
+        # Dumps work but the tab is not there yet: bar settling.
+        # Time-boxed — each re-dump is cheap while dumps succeed.
+        for retry in range(2):
+            if time.time() - tap_started > 45:
+                break
+            time.sleep(2)
+            log(f"tab {name} not found; re-dumping in place "
+                f"(retry {retry + 1}/2, no BACK)")
+            nodes_cur = parse_dump(dump(f"step_tab{i:02d}r{retry}"))
+            if nodes_cur:
+                remember_tabs(nodes_cur)
+            tab = find_tab(nodes_cur, desc)
+            if tab:
+                break
+    if not tab and nodes_cur:
+        # A first-run promo sheet (e.g. "Introducing instants") can
+        # cover the tab bar DURING the loop — the 1.14 probe's tabs
+        # 4-8 died on it — so the main loop's tap_skip never sees it.
+        # Dismiss it here and retry the tab once.
+        fresh = dismiss_sheet(nodes_cur, f"step_tab{i:02d}sheet")
+        if fresh is not None:
+            nodes_cur = fresh
+            remember_tabs(nodes_cur)
+            tab = find_tab(nodes_cur, desc)
+    if not tab and not nodes_cur:
+        # --- dump-failure path (re-probe 3) ---
+        if desc in LAST_TABS and time.time() - tap_started < 90:
+            cx, cy = LAST_TABS[desc]
+            log(f"tab {name} not found and UI dumps keep failing "
+                f"(reels video SurfaceView); tapping last-known "
+                f"coordinates ({cx}, {cy})")
+            tap(cx, cy)
+            STATUS.setdefault("dump_fallback_taps", []).append(name)
+            save_status()
+            tapped = True
+            LAST_TAP_NAME = name
+            time.sleep(3)
+            nodes_cur = parse_dump(dump(f"step_tab{i:02d}fb"))
+            if nodes_cur:
+                remember_tabs(nodes_cur)
+                tab = find_tab(nodes_cur, desc)
+            else:
+                # Still no dump: the fallback tap did not get us to a
+                # screen dumps can read. BACK once to leave the Reels
+                # tab for the feed, then re-dump once — but ONLY when
+                # the previous tap was Reels, so the current screen
+                # is the Reels tab and not the home feed (BACK on the
+                # feed would exit the app to the launcher).
+                if prev_tap == "reels" and \
+                        time.time() - tap_started < 75:
+                    log(f"still no UI dump after fallback tap; "
+                        f"BACK key once to leave the Reels tab")
+                    keyevent(4)
+                    STATUS.setdefault("back_recoveries", []).append(
+                        {"tab": name, "after": "fallback_tap"})
+                    save_status()
+                    time.sleep(3)
+                    nodes_cur = parse_dump(dump(f"step_tab{i:02d}bk"))
+                    if nodes_cur:
+                        remember_tabs(nodes_cur)
+                        if classify(nodes_cur) == "FEED":
+                            tab = find_tab(nodes_cur, desc)
+                            if tab:
+                                # BACK undid the fallback tap's
+                                # navigation: tap the tab again
+                                # for real below.
+                                tapped = False
+                elif time.time() - tap_started < 75:
+                    log(f"still no UI dump after fallback tap; NOT "
+                        f"pressing BACK (previous tap was "
+                        f"{prev_tap!r}, not Reels — the current "
+                        f"screen could be the feed, where BACK would "
+                        f"exit the app)")
+    if not tab and nodes_cur and not app_foreground(nodes_cur):
+        # We are no longer in the app at all: relaunch and try once
+        # more instead of screenshotting the launcher as if it were
+        # Instagram. Gated on a SUCCEEDED dump: empty nodes mean the
+        # dump failed, not that we left the app.
+        if time.time() - tap_started < 60:
+            log(f"tab {name} not found and app not in foreground; "
+                f"relaunching")
+            relaunch()
+            time.sleep(5)
+            nodes_cur = parse_dump(dump(f"step_tab{i:02d}re"))
+            if nodes_cur:
+                remember_tabs(nodes_cur)
+            tab = find_tab(nodes_cur, desc)
+    if tab and not tapped:
+        log(f"tap {i}/8: {name}")
+        tap(*tab["center"])
+        tapped = True
+        LAST_TAP_NAME = name
+        time.sleep(3)
+    elif tapped:
+        log(f"tap {i}/8: {name} (via last-known coordinates)")
+    else:
+        log(f"tab {name} still not found after in-place retries; "
+            f"recording the failure and capturing current screen "
+            f"as-is")
+        STATUS.setdefault("tab_failures", []).append(name)
+        save_status()
+    nodes_after = parse_dump(dump(f"step_tab{i:02d}after"))
+    if nodes_after:
+        remember_tabs(nodes_after)
+    if classify(nodes_after) == "NOTIF_DIALOG":
+        log("notification-permission dialog appeared mid-sequence; "
+            "dismissing (verified)")
+        new_state, nodes_after = dismiss_notif(nodes_after,
+                                               f"step_tab{i:02d}")
+        if new_state is None:
+            log("notification dialog still up mid-sequence after 2 "
+                "verified taps; leaving it for the next tab iteration")
+    elif classify(nodes_after) == "REEL_VIEWER":
+        # A tap opened a full-screen reel viewer (no tab bar): go
+        # back to the feed so the next tab tap can find the bar again.
+        log("full-screen reel viewer opened mid-sequence; going back "
+            "to the feed")
+        rec_state, rec_nodes = exit_viewer(f"step_tab{i:02d}reel",
+                                           "REEL_VIEWER")
+        if rec_state == "FEED":
+            nodes_after = rec_nodes
+        else:
+            log("reel viewer still up mid-sequence after BACK "
+                "attempts; continuing with the next tab")
+    screenshot(f"shot_tab{i:02d}_{name}")
+    if not pid_alive():
+        return nodes_after, True
+    return nodes_after, False
+
+
+def run_drag_test():
+    """1.13 drag-lens acceptance test: slow horizontal drag across
+    the tab bar, Home -> Reels. Screenshot mid-drag (the lens should
+    be visible following the finger) and after release (the tab
+    should have switched to Reels). The swipe runs in the background
+    so the mid-drag screenshot lands ~40% through it. Uses only
+    `adb shell input swipe`, the same `input` command family as the
+    taps above. Returns the drag result string and records
+    STATUS["drag_test"].
+
+    Re-probe 3: the drag test was SKIPPED because the dump after the
+    tap loop failed (reels SurfaceView) and Home/Reels could not be
+    found. If the dumps fail here but last-known tab centers exist,
+    the swipe still runs between those coordinates (the bar is
+    visibly present) and the result is DRAG_UNKNOWN_DUMP_FAILED
+    when the after-dump cannot confirm the switch — the mid/after
+    screenshots are the evidence. The verdict stays honest: a switch
+    is only claimed when a dump shows Reels selected."""
+    drag_result = "DRAG_SKIPPED"
+    try:
+        nodes_drag = parse_dump(dump("step_drag0"))
+        if nodes_drag:
+            remember_tabs(nodes_drag)
+        home_tab = find_tab(nodes_drag, "Home")
+        reels_tab = find_tab(nodes_drag, "Reels")
+        used_fallback = False
+        if not home_tab or not reels_tab:
+            # A first-run sheet may be covering the bar here too;
+            # dismiss it and retry once.
+            fresh = dismiss_sheet(nodes_drag, "step_drag_sheet")
+            if fresh is not None:
+                nodes_drag = fresh
+                remember_tabs(nodes_drag)
+                home_tab = find_tab(nodes_drag, "Home")
+                reels_tab = find_tab(nodes_drag, "Reels")
+        if (not home_tab or not reels_tab) and "Home" in LAST_TABS \
+                and "Reels" in LAST_TABS:
+            # Dumps failed (re-probe 3) but the bar is visibly
+            # present: swipe between the last-known centers.
+            log("drag test: UI dumps failing; using last-known tab "
+                "coordinates")
+            used_fallback = True
+            home_tab = {"center": LAST_TABS["Home"]}
+            reels_tab = {"center": LAST_TABS["Reels"]}
+        if home_tab and reels_tab:
+            x0, y0 = home_tab["center"]
+            x1, y1 = reels_tab["center"]
+            log(f"drag test: Home {home_tab['center']} -> "
+                f"Reels {reels_tab['center']} over 1200 ms")
+            subprocess.Popen(["adb", "-s", SER, "shell",
+                              "input", "swipe",
+                              str(x0), str(y0), str(x1), str(y1),
+                              "1200"])
+            time.sleep(0.48)  # ~40% through the swipe
+            screenshot("shot_drag_mid")
+            # Swipe ends 1.2 s after it started; then wait the
+            # same 3 s the taps get, so the tab has time to settle
+            # (in the 1.12 dumps the Reels tab only reports
+            # selected=true once the viewer has fully loaded).
+            time.sleep(3.0)
+            screenshot("shot_drag_after")
+            nodes_drag_after = parse_dump(dump("step_drag_after"))
+            if not nodes_drag_after:
+                drag_result = "DRAG_UNKNOWN_DUMP_FAILED"
+                log("drag test: after-dump failed; switch "
+                    "unconfirmed (see shot_drag_after.png)")
+                STATUS["drag_test"] = {
+                    "result": drag_result,
+                    "from": list(home_tab["center"]),
+                    "to": list(reels_tab["center"]),
+                    "used_fallback_coords": used_fallback,
+                    "mid_shot": "shot_drag_mid.png",
+                    "after_shot": "shot_drag_after.png",
+                }
+            else:
+                selected = [n["desc"] for n in nodes_drag_after
+                            if n.get("selected")
+                            and n["desc"] in
+                            ("Home", "Reels", "Message",
+                             "Search and explore", "Profile")]
+                switched = "Reels" in selected
+                drag_result = ("DRAG_SWITCHED_TO_REELS"
+                               if switched else "DRAG_NO_SWITCH")
+                log(f"drag test: {drag_result} "
+                    f"(selected now: {selected})")
+                STATUS["drag_test"] = {
+                    "result": drag_result,
+                    "from": list(home_tab["center"]),
+                    "to": list(reels_tab["center"]),
+                    "selected_after": selected,
+                    "used_fallback_coords": used_fallback,
+                    "mid_shot": "shot_drag_mid.png",
+                    "after_shot": "shot_drag_after.png",
+                }
+        else:
+            log("drag test skipped: Home/Reels tab not found")
+            STATUS["drag_test"] = {"result": "DRAG_SKIPPED"}
+    except Exception as e:
+        log(f"drag test error (non-fatal): {e}")
+        STATUS["drag_test"] = {"result": "DRAG_ERROR",
+                               "error": str(e)}
+    return drag_result
+
+
 def finish(status, detail=""):
     STATUS["status"] = status
     STATUS["detail"] = detail
@@ -783,6 +1117,10 @@ def main():
             log("HOME FEED REACHED — login succeeded; letting it settle")
             time.sleep(5)
             screenshot("shot_feed")
+            # Remember the bar now, while the dumps still work: the
+            # tap loop's dump-failure fallback needs last-known tab
+            # coordinates (re-probe 3: dumps die on the Reels tab).
+            remember_tabs(nodes)
             # 1.11 capsule-fix acceptance test: 8 tab taps
             # home -> reels -> direct -> profile -> home -> reels ->
             # direct -> home, screenshot + UI dump after EVERY tap.
@@ -796,152 +1134,19 @@ def main():
                 ("direct", "Message"), ("home", "Home"),
             ]
             for i, (name, desc) in enumerate(sequence, 1):
-                nodes_cur = parse_dump(dump(f"step_tab{i:02d}"))
-                tab = find_tab(nodes_cur, desc)
-                if not tab:
-                    # NO BACK HERE: on the home feed BACK exits the app
-                    # to the launcher and poisons every later screenshot
-                    # (1.13 probe: all 8 tab shots were the launcher).
-                    # Re-dump in place first — the bar may just be
-                    # settling after the previous tap.
-                    for retry in range(2):
-                        time.sleep(2)
-                        log(f"tab {name} not found; re-dumping in "
-                            f"place (retry {retry + 1}/2, no BACK)")
-                        nodes_cur = parse_dump(
-                            dump(f"step_tab{i:02d}r{retry}"))
-                        tab = find_tab(nodes_cur, desc)
-                        if tab:
-                            break
-                if not tab:
-                    # A first-run promo sheet (e.g. "Introducing
-                    # instants") can cover the tab bar DURING the
-                    # loop — the 1.14 probe's tabs 4-8 died on it —
-                    # so the main loop's tap_skip never sees it.
-                    # Dismiss it here and retry the tab once.
-                    fresh = dismiss_sheet(nodes_cur,
-                                          f"step_tab{i:02d}sheet")
-                    if fresh is not None:
-                        nodes_cur = fresh
-                        tab = find_tab(nodes_cur, desc)
-                if not tab and not app_foreground(nodes_cur):
-                    # We are no longer in the app at all: relaunch and
-                    # try once more instead of screenshotting the
-                    # launcher as if it were Instagram.
-                    log(f"tab {name} not found and app not in "
-                        f"foreground; relaunching")
-                    relaunch()
-                    time.sleep(5)
-                    nodes_cur = parse_dump(dump(f"step_tab{i:02d}re"))
-                    tab = find_tab(nodes_cur, desc)
-                if tab:
-                    log(f"tap {i}/8: {name}")
-                    tap(*tab["center"])
-                    time.sleep(3)
-                else:
-                    log(f"tab {name} still not found after in-place "
-                        f"retries; recording the failure and capturing "
-                        f"current screen as-is")
-                    STATUS.setdefault("tab_failures", []).append(name)
-                    save_status()
-                nodes_after = parse_dump(dump(f"step_tab{i:02d}after"))
-                if classify(nodes_after) == "NOTIF_DIALOG":
-                    log("notification-permission dialog appeared "
-                        "mid-sequence; dismissing (verified)")
-                    new_state, nodes_after = dismiss_notif(
-                        nodes_after, f"step_tab{i:02d}")
-                    if new_state is None:
-                        log("notification dialog still up mid-sequence "
-                            "after 2 verified taps; leaving it for the "
-                            "next tab iteration")
-                elif classify(nodes_after) == "REEL_VIEWER":
-                    # A tap opened a full-screen reel viewer (no tab
-                    # bar): go back to the feed so the next tab tap
-                    # can find the bar again.
-                    log("full-screen reel viewer opened mid-sequence; "
-                        "going back to the feed")
-                    rec_state, rec_nodes = exit_viewer(
-                        f"step_tab{i:02d}reel", "REEL_VIEWER")
-                    if rec_state == "FEED":
-                        nodes_after = rec_nodes
-                    else:
-                        log("reel viewer still up mid-sequence after "
-                            "BACK attempts; continuing with the next tab")
-                screenshot(f"shot_tab{i:02d}_{name}")
-                if not pid_alive():
+                _, crashed = tap_sequence_tab(i, name, desc)
+                if crashed:
                     return finish("CRASHED_AFTER_FEED",
                                   f"process died during tab sequence "
                                   f"(tap {i}/8: {name})")
             if not check_alive("8-tap tab sequence"):
                 return finish("CRASHED_AFTER_FEED",
                               "FATAL or dead process after tab sequence")
-            # 1.13 drag-lens acceptance test: slow horizontal drag across
-            # the tab bar, Home -> Reels. Screenshot mid-drag (the lens
-            # should be visible following the finger) and after release
-            # (the tab should have switched to Reels). The swipe runs in
-            # the background so the mid-drag screenshot lands ~40%
-            # through it. Uses only `adb shell input swipe`, the same
-            # `input` command family as the taps above.
-            drag_result = "DRAG_SKIPPED"
-            try:
-                nodes_drag = parse_dump(dump("step_drag0"))
-                home_tab = find_tab(nodes_drag, "Home")
-                reels_tab = find_tab(nodes_drag, "Reels")
-                if not home_tab or not reels_tab:
-                    # A first-run sheet may be covering the bar here
-                    # too; dismiss it and retry once.
-                    fresh = dismiss_sheet(nodes_drag, "step_drag_sheet")
-                    if fresh is not None:
-                        nodes_drag = fresh
-                        home_tab = find_tab(nodes_drag, "Home")
-                        reels_tab = find_tab(nodes_drag, "Reels")
-                if home_tab and reels_tab:
-                    x0, y0 = home_tab["center"]
-                    x1, y1 = reels_tab["center"]
-                    log(f"drag test: Home {home_tab['center']} -> "
-                        f"Reels {reels_tab['center']} over 1200 ms")
-                    subprocess.Popen(["adb", "-s", SER, "shell",
-                                      "input", "swipe",
-                                      str(x0), str(y0), str(x1), str(y1),
-                                      "1200"])
-                    time.sleep(0.48)  # ~40% through the swipe
-                    screenshot("shot_drag_mid")
-                    # Swipe ends 1.2 s after it started; then wait the
-                    # same 3 s the taps get, so the tab has time to settle
-                    # (in the 1.12 dumps the Reels tab only reports
-                    # selected=true once the viewer has fully loaded).
-                    time.sleep(3.0)
-                    screenshot("shot_drag_after")
-                    nodes_drag_after = parse_dump(dump("step_drag_after"))
-                    selected = [n["desc"] for n in nodes_drag_after
-                                if n.get("selected")
-                                and n["desc"] in
-                                ("Home", "Reels", "Message",
-                                 "Search and explore", "Profile")]
-                    switched = "Reels" in selected
-                    drag_result = ("DRAG_SWITCHED_TO_REELS"
-                                   if switched else "DRAG_NO_SWITCH")
-                    log(f"drag test: {drag_result} "
-                        f"(selected now: {selected})")
-                    STATUS["drag_test"] = {
-                        "result": drag_result,
-                        "from": list(home_tab["center"]),
-                        "to": list(reels_tab["center"]),
-                        "selected_after": selected,
-                        "mid_shot": "shot_drag_mid.png",
-                        "after_shot": "shot_drag_after.png",
-                    }
-                else:
-                    log("drag test skipped: Home/Reels tab not found")
-                    STATUS["drag_test"] = {"result": "DRAG_SKIPPED"}
-            except Exception as e:
-                log(f"drag test error (non-fatal): {e}")
-                STATUS["drag_test"] = {"result": "DRAG_ERROR",
-                                       "error": str(e)}
+            # 1.13 drag-lens acceptance test (see run_drag_test).
+            drag_result = run_drag_test()
             return finish("LOGGED_IN_FEED", "home feed + 8-tap sequence "
                           "captured (home/reels/direct/profile x2); "
                           f"drag test: {drag_result}")
-
         if state == "WRONG_PASSWORD":
             screenshot("shot_wrong_password")
             return finish("WRONG_PASSWORD",
