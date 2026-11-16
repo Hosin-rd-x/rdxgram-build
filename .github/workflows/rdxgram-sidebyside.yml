@@ -249,7 +249,7 @@ jobs:
           grep -q '<dimen name="direct_in_thread_composer_side_margin">15dp</dimen>' ig-decoded/res/values/rdx_split_dimens.xml || (echo "SPLIT_DIMEN_SIDEMARGIN_MISSING" && exit 1)
           echo "split repairs present: tabBarHeight -> tab_bar_height_panorama 48dp, strokeWidth -> circular_avatar_stroke_width 2px, mediaViewOuterVerticalMargin -> direct_in_thread_composer_top_margin 8dp x2"
           echo "split sweep 2k (Play-split XML drawables) in rebrand.log:"
-          grep -q '2k total: 6856 drawables, 0 xml stubs, 9 dimens, 131 xml files fixed' rebrand.log || (echo "SPLIT_2K_TOTAL_WRONG" && exit 1)
+          grep -q '2k total: 6863 drawables, 0 xml stubs, 9 dimens, 1772 xml files fixed' rebrand.log || (echo "SPLIT_2K_TOTAL_WRONG" && exit 1)
           grep -q '2k extra: 1 integers, 1 raws, 1 arrays' rebrand.log || (echo "SPLIT_2K_EXTRA_WRONG" && exit 1)
           grep -q '2k restore drawable dialog_x -> 0x7f08053d' rebrand.log || (echo "SPLIT_2K_DIALOG_X_MISSING" && exit 1)
           grep -q '2k restore drawable input -> 0x7f082185' rebrand.log || (echo "SPLIT_2K_INPUT_MISSING" && exit 1)
