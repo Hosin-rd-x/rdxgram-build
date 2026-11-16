@@ -220,10 +220,11 @@ jobs:
           # images are named <ver>_64only-latest (e.g. 13.0.0_64only-latest,
           # multi-arch amd64+arm64). There is NO -arm64 suffix — that was
           # the "manifest unknown" failure in probe run 43595377933.
-          # 2026-11-16: Redroid 14 tried FIRST (env test for the repeated
-          # libhwui RenderThread SIGSEGV in DeferredLayerUpdater::apply on
-          # Redroid 13; 13 stays as fallback).
-          for TAG in 14.0.0_64only-latest 13.0.0_64only-latest 15.0.0_64only-latest; do
+          # 2026-11-16: Redroid 15 tried FIRST (env test: Redroid 14 also
+          # crashed in the native graphics stack — SIGABRT, invalid
+          # GrBackendTexture, while the feed's first video rendered;
+          # 14 and 13 stay as fallbacks).
+          for TAG in 15.0.0_64only-latest 14.0.0_64only-latest 13.0.0_64only-latest; do
             if docker pull "redroid/redroid:$TAG"; then IMAGE="redroid/redroid:$TAG"; break; fi
           done
           if [ -z "$IMAGE" ]; then echo "NO_REDROID_IMAGE" > status.txt; exit 0; fi
