@@ -180,7 +180,7 @@ object FullScreenHook {
             val container = findByName(root, a, "layout_container_main", pkg)
             if (container != null) {
                 clearBottomPadding(container)
-                container.clipToPadding = false
+                (container as? ViewGroup)?.clipToPadding = false
             }
             // The pager is what actually ends above the bar (y=1088 on the
             // Redroid probe while the content area runs to y=1184): grow
@@ -189,19 +189,22 @@ object FullScreenHook {
             val pager = findByName(root, a, "swipeable_tab_view_pager", pkg)
             if (pager != null) {
                 clearBottomPadding(pager)
-                pager.clipToPadding = false
+                (pager as? ViewGroup)?.clipToPadding = false
                 growToParent(pager)
                 // ViewPager2's child is its own RecyclerView; its bottom
                 // padding is Instagram's room for the tab bar — same
                 // treatment, so the last rows slide under the capsule.
-                for (i in 0 until pager.childCount) {
-                    try {
-                        val child = pager.getChildAt(i) ?: continue
-                        if (child.javaClass.name.contains("RecyclerView")) {
-                            clearBottomPadding(child)
-                            child.clipToPadding = false
+                val pagerGroup = pager as? ViewGroup
+                if (pagerGroup != null) {
+                    for (i in 0 until pagerGroup.childCount) {
+                        try {
+                            val child = pagerGroup.getChildAt(i) ?: continue
+                            if (child.javaClass.name.contains("RecyclerView")) {
+                                clearBottomPadding(child)
+                                (child as? ViewGroup)?.clipToPadding = false
+                            }
+                        } catch (ignored: Throwable) {
                         }
-                    } catch (ignored: Throwable) {
                     }
                 }
             }

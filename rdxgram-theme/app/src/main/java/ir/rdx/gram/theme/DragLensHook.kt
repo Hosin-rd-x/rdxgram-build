@@ -223,7 +223,7 @@ object DragLensHook {
                         if (idx < 0) return false
                         val dx = ev.getX(idx) - downX
                         val dy = ev.getY(idx) - downY
-                        if (!dragging && abs(dx) > DragLensHook.dp(DragLensHook.DRAG_THRESHOLD_DP) && abs(dx) > abs(dy)) {
+                        if (!dragging && abs(dx) > dp(DragLensHook.DRAG_THRESHOLD_DP) && abs(dx) > abs(dy)) {
                             if (DragLensHook.tabCenters(bar).size < 2) return false
                             dragging = true
                             lensVisible = true
@@ -370,8 +370,8 @@ object DragLensHook {
                 // (up to ~12%), so the lens feels elastic, not rigid.
                 val pull = if (width > 0) abs(lensX - downX) / width else 0f
                 val stretch = 1f + min(DragLensHook.LENS_STRETCH_MAX, pull * 0.5f)
-                val lensW = DragLensHook.dp(DragLensHook.LENS_WIDTH_DP) * stretch
-                val lensH = h - DragLensHook.dp(12)
+                val lensW = dp(DragLensHook.LENS_WIDTH_DP) * stretch
+                val lensH = h - dp(12)
                 if (lensH <= 0f) return
                 val radius = lensH / 2f
                 val left = (lensX - lensW / 2f).coerceIn(0f, width - lensW)
@@ -381,7 +381,7 @@ object DragLensHook {
                 fillPaint.color = if (night) Color.argb(46, 255, 255, 255)
                 else Color.argb(31, 0, 0, 0)
                 strokePaint.style = Paint.Style.STROKE
-                strokePaint.strokeWidth = max(1f, DragLensHook.dp(1))
+                strokePaint.strokeWidth = max(1f, dp(1))
                 strokePaint.color = if (night) Color.argb(90, 255, 255, 255)
                 else Color.argb(48, 0, 0, 0)
                 canvas.drawRoundRect(left, top, left + lensW, top + lensH, radius, radius, fillPaint)
