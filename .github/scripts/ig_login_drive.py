@@ -41,6 +41,24 @@ tabs 4-8 died on that sheet).
 Finally it checks the log for FATAL crashes (CRASHED_AFTER_FEED if any
 appear).
 
+1.17 re-probe: after login the feed's top item auto-opened a
+full-screen reel viewer (no tab bar by design) and the driver had no
+way back — it misread the viewer as the add-photo interstitial
+("Profile picture of <author>" in the reel header) and died on
+STUCK_PHOTO. The viewer is now a first-class screen (REEL_VIEWER):
+BACK (on-screen Back button first, then the BACK key) returns to the
+feed, verified by a fresh dump, at most 3 attempts. BACK is still
+never pressed on the feed itself.
+The same run exposed a worse bug in dump(): a failed uiautomator run
+left the previous /sdcard/ui.xml in place, so the driver acted on a
+STALE dump — the notification dialog looked present for 4 steps while
+it was already gone, and the blind re-taps landed on the feed and
+opened the reel. dump() now deletes the old file (device + local)
+before every attempt, validates the XML, and returns None instead of
+a stale file; the main loop waits and retries the step instead of
+acting. The notification dialog is now dismissed with verification
+(tap, settle 5 s, fresh dump) and at most 2 taps.
+
 After a successful login Android may also show the system
 notification-permission dialog ("Allow Rdx gram to send you
 notifications?"). The driver dismisses it with "Don't allow" so it can
@@ -156,14 +174,34 @@ def clear_field(center):
 
 
 def dump(name):
+    """Dump the UI hierarchy to ui_<name>.xml and return its path.
+
+    1.17 re-probe lesson: a failed `uiautomator dump` leaves the
+    PREVIOUS /sdcard/ui.xml in place, and the old code pulled that
+    stale file and acted on it as if it were fresh — the
+    notification dialog looked present for 4 steps while it was
+    already gone, and the blind re-taps landed on the feed and
+    opened a reel. So the old file is deleted (device AND local)
+    before EVERY attempt, the pulled XML is validated, and a total
+    failure returns None instead of a stale file. Callers must
+    handle None (the main loop waits and retries the step)."""
     path = f"ui_{name}.xml"
     for _ in range(3):
+        if os.path.exists(path):
+            os.remove(path)
+        shell("rm", "/sdcard/ui.xml")
         shell("uiautomator", "dump", "/sdcard/ui.xml")
         out, _, _ = adb("pull", "/sdcard/ui.xml", path)
         if os.path.exists(path) and os.path.getsize(path) > 100:
+            try:
+                ET.parse(path)
+            except Exception:
+                os.remove(path)
+                time.sleep(2)
+                continue
             return path
         time.sleep(2)
-    return path if os.path.exists(path) else None
+    return None
 
 
 def parse_dump(path):
@@ -285,6 +323,94 @@ def dismiss_sheet(nodes, tag):
     STATUS.setdefault("sheets_dismissed", []).append("Not now")
     save_status()
     return parse_dump(dump(tag))
+
+
+def find_back_button(nodes):
+    """Top-left Back affordance of a full-screen viewer.
+
+    The reels viewer (1.17 re-probe ui_step08.xml) has a clickable
+    ImageView with content-desc "Back" at [0,66][96,160], center
+    (48,113). Restricted to the top-left corner so a "Back" node
+    elsewhere (a caption, a button label) never matches."""
+    for n in nodes:
+        if not n["clickable"] or n["center"] is None:
+            continue
+        if n["desc"].strip().lower() == "back":
+            x, y = n["center"]
+            if x <= 120 and y <= 200:
+                return n
+    return None
+
+
+def exit_viewer(tag, screen="REEL_VIEWER"):
+    """Leave a full-screen reel/photo viewer and get back to the feed.
+
+    The viewer hides the tab bar by design, so the only way back is
+    BACK: tap the on-screen Back button first, fall back to the BACK
+    key. Every attempt is verified with a fresh dump — BACK is NEVER
+    pressed on the feed itself (that would exit the app to the
+    launcher). At most 3 attempts. Returns (state, nodes): ("FEED",
+    nodes) on success, otherwise the last classified state and its
+    nodes. A success is recorded in status.json (viewer_recoveries)."""
+    nodes = []
+    state = None
+    for attempt in (1, 2, 3):
+        nodes = parse_dump(dump(f"{tag}b{attempt}"))
+        state = classify(nodes)
+        if state == "FEED":
+            break
+        btn = find_back_button(nodes)
+        if btn:
+            log(f"viewer recovery: tapping Back button "
+                f"(attempt {attempt}/3)")
+            tap(*btn["center"])
+        else:
+            log(f"viewer recovery: no Back button; BACK key "
+                f"(attempt {attempt}/3)")
+            keyevent(4)
+        time.sleep(3)
+        nodes = parse_dump(dump(f"{tag}b{attempt}after"))
+        state = classify(nodes)
+        if state == "FEED":
+            STATUS.setdefault("viewer_recoveries", []).append(
+                {"screen": screen, "tag": tag, "attempts": attempt})
+            save_status()
+            log(f"viewer recovery: back on FEED after {attempt} "
+                f"attempt(s)")
+            break
+        log(f"viewer recovery: still {state} after attempt {attempt}/3")
+    return state, nodes
+
+
+def dismiss_notif(nodes, tag):
+    """Dismiss the system notification-permission dialog, VERIFIED.
+
+    1.17 re-probe lesson: the driver tapped "Don't allow" four times
+    while the dialog (or a stale dump of it) kept showing, and the
+    blind re-taps landed on the feed and opened a reel. The dialog
+    itself dismisses fine with one tap (1.15 probe) — the bug was
+    tapping without verifying. So: tap at most twice, settle 5 s,
+    and check a FRESH dump before tapping again. Returns
+    (state, nodes) after dismissal, or (None, nodes) if the dialog
+    is still up after 2 verified taps."""
+    for attempt in (1, 2):
+        btn = find_exact(nodes, "Don't allow", "Don’t allow") or \
+            find(nodes, "Don't allow")
+        if not btn:
+            return None, nodes
+        log(f"notification-permission dialog; tapping Don't allow "
+            f"(attempt {attempt}/2, verified)")
+        tap(*btn["center"])
+        time.sleep(5)
+        nodes = parse_dump(dump(f"{tag}n{attempt}"))
+        state = classify(nodes)
+        if state != "NOTIF_DIALOG":
+            log(f"notification dialog dismissed after {attempt} "
+                f"tap(s); now on {state}")
+            return state, nodes
+        log(f"notification dialog still present after tap "
+            f"{attempt}/2; verifying with a fresh dump before retrying")
+    return None, nodes
 
 
 def find_edit(nodes, *desc_prefixes):
@@ -483,6 +609,14 @@ def classify(nodes):
                    if k in descs or k in t)
     if nav_hits >= 3 or "your story" in t:
         return "FEED"
+    # Full-screen reel viewer (1.17 re-probe): the feed's top item can
+    # auto-open it right after login. It hides the tab bar by design,
+    # so nav_hits stays low (header "Reels" + "Profile picture of
+    # <author>" = 2 at most) and FEED above does not fire. Checked
+    # AFTER FEED on purpose: a healthy feed never contains "Reel by",
+    # and a viewer must never be mistaken for the feed.
+    if any(k in t for k in ("reel by", "double tap to play or pause")):
+        return "REEL_VIEWER"
     if any(k in t for k in (
             "suspicious", "checkpoint", "confirm it's you",
             "we need to confirm", "verify your account",
@@ -516,7 +650,16 @@ def classify(nodes):
         return "INTERSTITIAL"
     if any(k in t for k in ("profile photo", "profile picture",
                             "add a photo")):
-        return "PHOTO"
+        # A reel/photo viewer header also says "Profile picture of
+        # <author>" — that is NOT the add-photo interstitial (1.17
+        # re-probe: the viewer was misread as PHOTO and died on
+        # STUCK_PHOTO). Only call it PHOTO when it really asks to add
+        # one, or offers a Skip/Not-now affordance, which the viewer
+        # never does.
+        if ("add a photo" in t or "add a profile photo" in t
+                or find_exact(nodes, "Skip", "Not now",
+                              "Maybe later")):
+            return "PHOTO"
     if any(k in t for k in ("we limit how often", "try again later",
                             "too many attempts")):
         return "RATE_LIMITED"
@@ -580,6 +723,15 @@ def main():
             return finish("TIMEOUT", "driver deadline reached")
         path = dump(f"step{step:02d}")
         nodes = parse_dump(path)
+        if path is None:
+            # dump() failed 3x (e.g. the UI never goes idle while a
+            # video plays): there is NO fresh hierarchy, so act on
+            # nothing — wait and retry this step instead of tapping
+            # blindly at coordinates from an old screen.
+            log("UI dump failed (no fresh hierarchy); waiting 3s "
+                "and retrying this step without acting")
+            time.sleep(3)
+            continue
         state = classify(nodes)
         # A focused field means the soft keyboard is up and covers the
         # lower buttons: hide it once per screen visit before any button
@@ -608,6 +760,24 @@ def main():
         log(f"step {step}: screen={state} "
             f"texts={all_text(nodes)[:300]!r}")
         save_status()
+
+        if state == "REEL_VIEWER":
+            # Full-screen reel viewer opened right after login (the
+            # feed's top item auto-opened it in the 1.17 re-probe) or
+            # mid-flow: the tab bar is hidden by design, so go BACK
+            # to the feed — verified, at most 3 attempts. BACK is
+            # never pressed on the feed itself. On success the next
+            # loop iteration re-classifies the fresh screen (FEED).
+            log("full-screen reel viewer (tab bar hidden by design); "
+                "going back to the feed")
+            rec_state, _ = exit_viewer(f"step{step:02d}reel",
+                                       "REEL_VIEWER")
+            if rec_state == "FEED":
+                continue
+            screenshot("shot_stuck_reel")
+            return finish("STUCK_REEL_VIEWER",
+                          "full-screen reel viewer did not return to "
+                          "the feed after 3 BACK attempts")
 
         if state == "FEED":
             log("HOME FEED REACHED — login succeeded; letting it settle")
@@ -676,16 +846,27 @@ def main():
                     save_status()
                 nodes_after = parse_dump(dump(f"step_tab{i:02d}after"))
                 if classify(nodes_after) == "NOTIF_DIALOG":
-                    btn = find_exact(nodes_after, "Don't allow",
-                                     "Don’t allow") or \
-                        find(nodes_after, "Don't allow")
-                    if btn:
-                        log("notification-permission dialog appeared "
-                            "mid-sequence; tapping Don't allow")
-                        tap(*btn["center"])
-                        time.sleep(2)
-                        nodes_after = parse_dump(
-                            dump(f"step_tab{i:02d}after2"))
+                    log("notification-permission dialog appeared "
+                        "mid-sequence; dismissing (verified)")
+                    new_state, nodes_after = dismiss_notif(
+                        nodes_after, f"step_tab{i:02d}")
+                    if new_state is None:
+                        log("notification dialog still up mid-sequence "
+                            "after 2 verified taps; leaving it for the "
+                            "next tab iteration")
+                elif classify(nodes_after) == "REEL_VIEWER":
+                    # A tap opened a full-screen reel viewer (no tab
+                    # bar): go back to the feed so the next tab tap
+                    # can find the bar again.
+                    log("full-screen reel viewer opened mid-sequence; "
+                        "going back to the feed")
+                    rec_state, rec_nodes = exit_viewer(
+                        f"step_tab{i:02d}reel", "REEL_VIEWER")
+                    if rec_state == "FEED":
+                        nodes_after = rec_nodes
+                    else:
+                        log("reel viewer still up mid-sequence after "
+                            "BACK attempts; continuing with the next tab")
                 screenshot(f"shot_tab{i:02d}_{name}")
                 if not pid_alive():
                     return finish("CRASHED_AFTER_FEED",
@@ -949,19 +1130,20 @@ def main():
                           "save-login sheet has no Not-now button")
 
         if state == "NOTIF_DIALOG":
-            btn = find_exact(nodes, "Don't allow", "Don’t allow") or \
-                find(nodes, "Don't allow")
-            if btn:
-                log("system notification-permission dialog "
-                    "('Allow Rdx gram to send you notifications?'); "
-                    "tapping Don't allow")
-                tap(*btn["center"])
-                time.sleep(2)
-                continue
-            screenshot("shot_notif_dialog")
-            return finish("STUCK_NOTIF_DIALOG",
-                          "notification-permission dialog has no "
-                          "Don't allow button")
+            # Dismiss with verification (tap, settle, fresh dump) and
+            # at most 2 taps — the 1.17 re-probe tapped blindly 4
+            # times while a stale dump kept showing the dialog, and
+            # the extra taps landed on the feed and opened a reel.
+            new_state, nodes = dismiss_notif(nodes, f"step{step:02d}")
+            if new_state is None:
+                screenshot("shot_notif_dialog")
+                return finish("STUCK_NOTIF_DIALOG",
+                              "notification-permission dialog could not "
+                              "be dismissed (no button, or still up "
+                              "after 2 verified taps)")
+            # Dismissed (or the screen changed): the next loop
+            # iteration classifies the fresh screen.
+            continue
 
         if state in ("FIND_PEOPLE", "INTERSTITIAL", "PHOTO"):
             if tap_skip(nodes):
@@ -970,6 +1152,23 @@ def main():
             if tap_next(nodes):
                 time.sleep(3)
                 continue
+            # A full-screen photo viewer can still land here as PHOTO
+            # (its header says "Profile picture of <author>") even
+            # with the tightened PHOTO check — if it has a Back button
+            # and no Skip/Next, it is a viewer, not the interstitial:
+            # go back to the feed instead of declaring STUCK.
+            if state == "PHOTO" and find_back_button(nodes):
+                log("PHOTO screen has a Back button and no Skip/Next "
+                    "— treating it as a full-screen viewer")
+                rec_state, _ = exit_viewer(f"step{step:02d}photo",
+                                           "PHOTO_VIEWER")
+                if rec_state == "FEED":
+                    continue
+                screenshot(f"shot_stuck_{state.lower()}")
+                return finish("STUCK_REEL_VIEWER",
+                              "full-screen viewer (seen as PHOTO) did "
+                              "not return to the feed after 3 BACK "
+                              "attempts")
             screenshot(f"shot_stuck_{state.lower()}")
             return finish(f"STUCK_{state}",
                           f"no Skip/Not-now on {state} screen")
