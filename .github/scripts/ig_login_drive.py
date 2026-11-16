@@ -177,6 +177,7 @@ def parse_dump(path):
             "desc": n.get("content-desc") or "",
             "cls": n.get("class") or "",
             "clickable": n.get("clickable") == "true",
+            "selected": n.get("selected") == "true",
             "bounds": b,
             "center": center,
             "resource": n.get("resource-id") or "",
@@ -624,8 +625,64 @@ def main():
             if not check_alive("8-tap tab sequence"):
                 return finish("CRASHED_AFTER_FEED",
                               "FATAL or dead process after tab sequence")
+            # 1.13 drag-lens acceptance test: slow horizontal drag across
+            # the tab bar, Home -> Reels. Screenshot mid-drag (the lens
+            # should be visible following the finger) and after release
+            # (the tab should have switched to Reels). The swipe runs in
+            # the background so the mid-drag screenshot lands ~40%
+            # through it. Uses only `adb shell input swipe`, the same
+            # `input` command family as the taps above.
+            drag_result = "DRAG_SKIPPED"
+            try:
+                nodes_drag = parse_dump(dump("step_drag0"))
+                home_tab = find_tab(nodes_drag, "Home")
+                reels_tab = find_tab(nodes_drag, "Reels")
+                if home_tab and reels_tab:
+                    x0, y0 = home_tab["center"]
+                    x1, y1 = reels_tab["center"]
+                    log(f"drag test: Home {home_tab['center']} -> "
+                        f"Reels {reels_tab['center']} over 1200 ms")
+                    subprocess.Popen(["adb", "-s", SER, "shell",
+                                      "input", "swipe",
+                                      str(x0), str(y0), str(x1), str(y1),
+                                      "1200"])
+                    time.sleep(0.48)  # ~40% through the swipe
+                    screenshot("shot_drag_mid")
+                    # Swipe ends 1.2 s after it started; then wait the
+                    # same 3 s the taps get, so the tab has time to settle
+                    # (in the 1.12 dumps the Reels tab only reports
+                    # selected=true once the viewer has fully loaded).
+                    time.sleep(3.0)
+                    screenshot("shot_drag_after")
+                    nodes_drag_after = parse_dump(dump("step_drag_after"))
+                    selected = [n["desc"] for n in nodes_drag_after
+                                if n.get("selected")
+                                and n["desc"] in
+                                ("Home", "Reels", "Message",
+                                 "Search and explore", "Profile")]
+                    switched = "Reels" in selected
+                    drag_result = ("DRAG_SWITCHED_TO_REELS"
+                                   if switched else "DRAG_NO_SWITCH")
+                    log(f"drag test: {drag_result} "
+                        f"(selected now: {selected})")
+                    STATUS["drag_test"] = {
+                        "result": drag_result,
+                        "from": list(home_tab["center"]),
+                        "to": list(reels_tab["center"]),
+                        "selected_after": selected,
+                        "mid_shot": "shot_drag_mid.png",
+                        "after_shot": "shot_drag_after.png",
+                    }
+                else:
+                    log("drag test skipped: Home/Reels tab not found")
+                    STATUS["drag_test"] = {"result": "DRAG_SKIPPED"}
+            except Exception as e:
+                log(f"drag test error (non-fatal): {e}")
+                STATUS["drag_test"] = {"result": "DRAG_ERROR",
+                                       "error": str(e)}
             return finish("LOGGED_IN_FEED", "home feed + 8-tap sequence "
-                          "captured (home/reels/direct/profile x2)")
+                          "captured (home/reels/direct/profile x2); "
+                          f"drag test: {drag_result}")
 
         if state == "WRONG_PASSWORD":
             screenshot("shot_wrong_password")
