@@ -59,22 +59,6 @@ import java.util.WeakHashMap
  * reach reliably here. The look is a translucent capsule, not native glass.
  * If a Compose view ever covers the bar, the capsule is hidden behind it;
  * that case is logged and only a phone test can settle it.
- *
- * 1.13 adds, in the same spirit and the same file's sweep path:
- *  - FullScreenHook: transparent status/navigation bars, content laid out
- *    under both, a very light top gradient scrim (an honest stand-in for
- *    a soft blur behind the status icons — see FullScreenHook's doc, it
- *    is a scrim, not a blur), and the feed pager grown so content scrolls
- *    UNDER the capsule while the area behind the capsule stays fully
- *    transparent;
- *  - DragLensHook: a full drag animation between tabs — a transparent
- *    overlay over the bar, an 8dp tap-vs-drag threshold, a glass lens
- *    pill following the finger, snap to the nearest tab on release with
- *    a ValueAnimator + OvershootInterpolator settle. Taps and long-press
- *    pass through untouched.
- * The 1.11 capsule fix (TAG_CAPSULE_DRAWABLE identity check) is intact
- * and still the only thing standing between the capsule and Instagram's
- * own tab-bar controller replacing its background with a flat colour.
  */
 object TabBarHook {
 
@@ -175,9 +159,6 @@ object TabBarHook {
                     } else {
                         apply(cached)
                     }
-                    // Re-arm the drag overlay if Instagram rebuilt the
-                    // bar's children and dropped it (cheap no-op when present).
-                    DragLensHook.attach(cached)
                 }
                 if (!Settings.isBarEnabled(a) && styledBars.isEmpty()) return@addOnGlobalLayoutListener
                 if (!pendingSweeps.add(decor)) return@addOnGlobalLayoutListener
@@ -225,13 +206,6 @@ object TabBarHook {
     private fun sweep(a: Activity?) {
         // The debounced runnable can outlive its activity (rotation, quick back press).
         if (a == null || a.isFinishing || a.isDestroyed) return
-        // Full-screen runs on every sweep too (not only when the bar is
-        // found): the feed geometry is per-tab and Instagram resets it as
-        // you navigate, so it needs the same re-application rhythm.
-        try {
-            FullScreenHook.apply(a)
-        } catch (ignored: Throwable) {
-        }
         try {
             val root = a.window?.decorView as? ViewGroup ?: return
             var bar = cachedBar()
@@ -300,7 +274,6 @@ object TabBarHook {
                 && bar.background === appliedCapsule) {
                 // Same theme, same size — only the selected tab may have moved.
                 refreshHighlight(bar, night)
-                DragLensHook.attach(bar)
                 return
             }
 
@@ -319,13 +292,13 @@ object TabBarHook {
                 bar.setTag(TAG_SAVED_STATE, saved)
             }
 
-            // Capsule, liquid-glass style (1.13): a vertical gradient —
-            // light at the top edge, deeper at the bottom — over a
-            // translucent fill, with a thin light border. The fill is
-            // deliberately more translucent than the old solid 60%/70%
-            // so the feed shows through the capsule itself, while
-            // everything behind and around it stays fully transparent
-            // (no blur anywhere near the capsule — see FullScreenHook).
+            // Capsule, liquid-glass style (1.13, kept in the 1.14 bisect):
+            // a vertical gradient — light at the top edge, deeper at the
+            // bottom — over a translucent fill, with a thin light border.
+            // The fill is deliberately more translucent than the old
+            // solid 60%/70% so the feed shows through the capsule itself,
+            // while everything behind and around it stays fully
+            // transparent (no blur anywhere near the capsule).
             val capsule = GradientDrawable()
             capsule.shape = GradientDrawable.RECTANGLE
             capsule.cornerRadius = radiusPx.toFloat()
@@ -372,7 +345,6 @@ object TabBarHook {
             hideDivider(bar, saved)
             warnIfComposeCovered(bar)
             refreshHighlight(bar, night)
-            DragLensHook.attach(bar)
 
             bar.setTag(TAG_APPLIED_SIGNATURE, signature)
             styledBars.add(bar)
@@ -510,7 +482,6 @@ object TabBarHook {
     /** Return the bar to exactly how Instagram drew it, and forget the saved state. */
     private fun restore(bar: ViewGroup) {
         try {
-            DragLensHook.detach(bar)
             val saved = bar.getTag(TAG_SAVED_STATE) as? SavedState ?: return
             // A saved background belongs to the theme that was active when the bar was
             // first styled; if the theme changed since, it is stale — but an opaque stale

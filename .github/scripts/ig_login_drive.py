@@ -30,6 +30,10 @@ home -> reels -> direct -> profile -> home -> reels -> direct -> home,
 with a screenshot AND a UI dump after EVERY tap. (The 1.10/1.11 probes
 only did feed -> explore -> profile -> feed, so the suspected trigger
 tabs reels/direct were never visited and the fix stayed unproven.)
+If a tab is not found the driver re-dumps in place and relaunches if
+the app left the foreground — it NEVER presses BACK on the feed,
+because BACK exits the app to the launcher and poisons every later
+screenshot (1.13 probe: all 8 tab shots were the launcher).
 Finally it checks the log for FATAL crashes (CRASHED_AFTER_FEED if any
 appear).
 
@@ -246,6 +250,17 @@ def find_tab(nodes, desc):
         if n["desc"].strip() == desc and n["center"][1] >= bar_top:
             return n
     return None
+
+
+def app_foreground(nodes):
+    """True if any node in the dump belongs to our app package.
+
+    Tells a genuinely missing tab bar (we are in the app, the bar has
+    no tabs — a real app failure, as in the 1.13 probe) from having
+    left the app entirely (launcher/home screen — a driver failure,
+    not an app failure)."""
+    return any((n.get("resource") or "").startswith(
+        ("com.rdx.gram", "com.instagram")) for n in nodes)
 
 
 def find_edit(nodes, *desc_prefixes):
@@ -590,21 +605,40 @@ def main():
                 nodes_cur = parse_dump(dump(f"step_tab{i:02d}"))
                 tab = find_tab(nodes_cur, desc)
                 if not tab:
-                    # The tab bar can hide behind a full-screen viewer
-                    # (e.g. Reels): BACK once and look again.
-                    log(f"tab {name} not found; pressing BACK and "
-                        f"retrying once")
-                    keyevent(4)
-                    time.sleep(1.5)
-                    nodes_cur = parse_dump(dump(f"step_tab{i:02d}b"))
+                    # NO BACK HERE: on the home feed BACK exits the app
+                    # to the launcher and poisons every later screenshot
+                    # (1.13 probe: all 8 tab shots were the launcher).
+                    # Re-dump in place first — the bar may just be
+                    # settling after the previous tap.
+                    for retry in range(2):
+                        time.sleep(2)
+                        log(f"tab {name} not found; re-dumping in "
+                            f"place (retry {retry + 1}/2, no BACK)")
+                        nodes_cur = parse_dump(
+                            dump(f"step_tab{i:02d}r{retry}"))
+                        tab = find_tab(nodes_cur, desc)
+                        if tab:
+                            break
+                if not tab and not app_foreground(nodes_cur):
+                    # We are no longer in the app at all: relaunch and
+                    # try once more instead of screenshotting the
+                    # launcher as if it were Instagram.
+                    log(f"tab {name} not found and app not in "
+                        f"foreground; relaunching")
+                    relaunch()
+                    time.sleep(5)
+                    nodes_cur = parse_dump(dump(f"step_tab{i:02d}re"))
                     tab = find_tab(nodes_cur, desc)
                 if tab:
                     log(f"tap {i}/8: {name}")
                     tap(*tab["center"])
                     time.sleep(3)
                 else:
-                    log(f"tab {name} still not found; capturing "
+                    log(f"tab {name} still not found after in-place "
+                        f"retries; recording the failure and capturing "
                         f"current screen as-is")
+                    STATUS.setdefault("tab_failures", []).append(name)
+                    save_status()
                 nodes_after = parse_dump(dump(f"step_tab{i:02d}after"))
                 if classify(nodes_after) == "NOTIF_DIALOG":
                     btn = find_exact(nodes_after, "Don't allow",
