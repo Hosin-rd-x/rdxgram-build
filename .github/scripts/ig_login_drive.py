@@ -95,6 +95,36 @@ notification-permission dialog ("Allow Rdx gram to send you
 notifications?"). The driver dismisses it with "Don't allow" so it can
 reach the feed instead of ending on UNKNOWN_SCREEN.
 
+1.17.1 re-probe: the drag DID switch the tab (Home 23:21:28 ->
+Reels viewer 23:21:36, Reels highlighted) — the first time a drag
+ever switched — but the verdict stayed DRAG_UNKNOWN_DUMP_FAILED:
+no lens was seen in the mid-shot, the after-dump failed (reels
+SurfaceView), and logcat-final.txt had ZERO RdxGramTheme lines
+(the final capture ran ~44 s after the drag; reels log spam evicted
+the drag lines from the ring buffer). Three verification gaps, all
+driver-side, fixed in #4: (1) the switch is now also confirmed from
+the after-SCREENSHOT itself (the Reels viewer has a dark capsule +
+dark top strip, vs the light Home feed — measured on the real shots
+from the 1.15 + 1.17.1 re-probe runs, no false positive on any
+Home/Direct/Profile shot); a late re-dump after the SurfaceView
+settles is tried first, and DRAG_UNKNOWN_DUMP_FAILED is kept only
+when neither the dump nor the screenshot confirms the switch (or
+the no-switch). NOTE — the dump alone cannot prove a Reels switch:
+measured on the real dumps, a post-Reels-tap dump keeps Home
+selected=true and usually has no "Reel by" text at +3 s (1.15
+tab02after/tab06after, 1.17.1 re-probe has no tab02after at all),
+so a Home-selected dump does NOT prove no-switch either; the
+screenshot is the primary switch evidence and the dump only fires
+when Reels is selected or viewer text is present. (2) TWO
+mid-shots (~40% and ~70% through the swipe) and the lens is
+measured by pixel comparison against the tab-8 reference shot
+(the glass lens darkens the capsule ~17-29 units where it sits;
+the negative controls — 1.15 with no drag hook, 1.17 re-probe 4
+with the broken overlay — darken by exactly 0). (3) logcat is
+snapshotted IMMEDIATELY after the drag test (logcat-drag.txt)
+before the ~40 s dump-retry loop, so the drag RdxLog.d lines
+survive; the existing final capture in finish() is untouched.
+
 Outputs (working dir): status.json, status.txt, timeline.txt, ui_step*.xml,
 shot_*.png, logcat-final.txt, crash-final.txt.
 Exit code is always 0 — the verdict lives in status.json/status.txt.
@@ -102,11 +132,13 @@ Exit code is always 0 — the verdict lives in status.json/status.txt.
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
+import zlib
 
 SER = os.environ.get("ANDROID_SERIAL", "localhost:5555")
 PKG = os.environ["PKG"]
@@ -139,6 +171,23 @@ LAST_TAP_NAME = None
 # Per-tap time cap in the 8-tap sequence (re-probe 3: one failed tap
 # burned ~4 min). No new expensive step starts once it is spent.
 TAP_BUDGET_SEC = 120
+
+# Drag-test timing (fix #4). The swipe runs DRAG_SWIPE_MS on-device,
+# but it only starts after the adb round-trip (~0.2-0.6 s), and each
+# screencap costs another adb round-trip (~0.3-0.5 s), so a single
+# mid-shot is a gamble on adb latency: the 1.17.1 re-probe's only
+# mid-shot (0.48 s after Popen) caught the lens only faintly — the
+# pixel profile shows the glass darkening (~29 early / ~17 late units
+# vs the tab-8 reference shot) but at 1x it looked like a plain Home
+# feed, so the lens was judged "not seen". Two mid-shots bracket the
+# gesture instead (early ~40%, late ~70%), and the lens is now also
+# measured by pixel comparison (see detect_lens_in_shots), not just
+# eyeballed. The after-shot stays at the same ~3.48 s after Popen as
+# before (0.48 + 3.0), so the tab has the same time to settle.
+DRAG_SWIPE_MS = 1200
+DRAG_MID1_S = 0.48   # ~40% through the swipe
+DRAG_MID2_S = 0.84   # ~70% through the swipe (0.36 s after mid1)
+DRAG_AFTER_S = 3.48  # after-shot, same total as the old 0.48 + 3.0
 
 
 def log(msg):
@@ -1069,6 +1118,211 @@ def tap_sequence_tab(i, name, desc):
     return nodes_after, False
 
 
+def _png_pixels(path):
+    """Decode a screencap PNG (8-bit RGB/RGBA, non-interlaced) with
+    stdlib only — the probe runner has no Pillow. Returns
+    (width, height, channels, pixels-bytes) or None on any failure.
+    Only mean luminances of small regions are ever read from the
+    pixels, never the full image."""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    pos = 8
+    idat = b""
+    width = height = bitdepth = colortype = None
+    while pos + 8 <= len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        ctype = data[pos + 4:pos + 8]
+        chunk = data[pos + 8:pos + 8 + length]
+        if ctype == b"IHDR":
+            width, height, bitdepth, colortype = struct.unpack(
+                ">IIBB", chunk[:10])
+        elif ctype == b"IDAT":
+            idat += chunk
+        elif ctype == b"IEND":
+            break
+        pos += 12 + length
+    if width is None or bitdepth != 8 or colortype not in (2, 6):
+        return None
+    ch = 3 if colortype == 2 else 4
+    try:
+        raw = zlib.decompress(idat)
+    except Exception:
+        return None
+    stride = width * ch
+    if len(raw) < height * (stride + 1):
+        return None
+    out = bytearray(width * height * ch)
+    prev = bytearray(stride)
+    p = 0
+    for y in range(height):
+        f = raw[p]
+        p += 1
+        line = bytearray(raw[p:p + stride])
+        p += stride
+        if f == 1:
+            for i in range(ch, stride):
+                line[i] = (line[i] + line[i - ch]) & 0xFF
+        elif f == 2:
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 0xFF
+        elif f == 3:
+            for i in range(stride):
+                a = line[i - ch] if i >= ch else 0
+                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 0xFF
+        elif f == 4:
+            for i in range(stride):
+                a = line[i - ch] if i >= ch else 0
+                b = prev[i]
+                c = prev[i - ch] if i >= ch else 0
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pr = a if (pa <= pb and pa <= pc) else (
+                    b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 0xFF
+        elif f != 0:
+            return None
+        out[y * stride:(y + 1) * stride] = line
+        prev = line
+    return width, height, ch, bytes(out)
+
+
+def _region_mean_lum(png, x0, y0, x1, y1):
+    """Mean luminance of a rectangle, given in logical 720x1280
+    coordinates (scaled to the actual screenshot size). Samples
+    every 2nd pixel in both axes — thousands of samples per box,
+    plenty for a mean. Returns None if the rectangle is empty."""
+    width, height, ch, px = png
+    sx = width / 720.0
+    sy = height / 1280.0
+    x0 = max(0, int(x0 * sx))
+    y0 = max(0, int(y0 * sy))
+    x1 = min(width, int(x1 * sx))
+    y1 = min(height, int(y1 * sy))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    total = 0.0
+    n = 0
+    for y in range(y0, y1, 2):
+        base = y * width * ch
+        for x in range(x0, x1, 2):
+            o = base + x * ch
+            total += 0.299 * px[o] + 0.587 * px[o + 1] + 0.114 * px[o + 2]
+            n += 1
+    return total / n if n else None
+
+
+def detect_drag_switch_from_shot(path):
+    """Classify an after-drag screenshot as 'reels' (the Reels viewer
+    is up — the drag switched), 'home' (the home feed is up — the
+    drag did not switch), or 'unclear'.
+
+    Signals, measured on the real probe shots (1.17.1 re-probe,
+    1.15, 1.17 re-probe 4): the bottom capsule over the Reels viewer
+    is dark (mean of the 5 tab boxes ~= 150) and the top strip is
+    dark (mean ~= 136-165), while the home feed is light on both
+    (capsule ~= 226, top ~= 233-239). Thresholds sit in wide gaps
+    (capsule 150 vs 226+, top 136-165 vs 226+), so a bright reel
+    that pushes the capsule over the line only degrades to
+    'unclear' — never a false 'reels'. The Direct inbox is 'unclear'
+    too (light capsule, dark top). The Profile screen reads as
+    'home' (light capsule + light top); the swipe path Home->Reels
+    cannot land on Profile, so that mislabel cannot affect the drag
+    verdict. Returns (label, evidence dict)."""
+    png = _png_pixels(path)
+    if png is None:
+        return "unclear", {}
+    tab_centers = (97, 228, 359, 490, 622)
+    box_means = [_region_mean_lum(png, x - 45, 1080, x + 45, 1160)
+                 for x in tab_centers]
+    if any(v is None for v in box_means):
+        return "unclear", {}
+    bar_mean = sum(box_means) / len(box_means)
+    top_mean = _region_mean_lum(png, 0, 60, 720, 120)
+    if top_mean is None:
+        return "unclear", {}
+    ev = {"bar_mean": round(bar_mean, 1), "top_mean": round(top_mean, 1)}
+    if bar_mean < 190 and top_mean < 200:
+        return "reels", ev
+    if bar_mean > 200 and top_mean > 200:
+        return "home", ev
+    return "unclear", ev
+
+
+def detect_lens_in_shots(mid_paths, ref_path):
+    """Measure whether the glass lens is visible in mid-drag shots.
+
+    Compares each mid-shot against the pre-drag Home shot
+    (shot_tab08_home.png, captured minutes earlier — the bar is
+    static and the capsule effectively opaque, so the reference
+    zones are stable to <1 unit across every Home shot in every
+    probe): the glass lens darkens the capsule where it sits. Two
+    zones cover the lens positions at ~40% (early, x 110-200) and
+    ~70% (late, x 150-250) through the swipe. Measured: the 1.17.1
+    re-probe mid-shot darkens by ~29 (early) / ~17 (late) units,
+    while the negative controls — 1.15 (no drag hook) and 1.17
+    re-probe 4 (broken overlay) — darken by exactly 0. A darkening
+    of 10-60 counts as the lens; below 10 is noise, above 60 means
+    the shot is already a different (dark) screen, not a lens.
+    Returns (seen, darkening, zone, shot) — seen None when the
+    reference shot is missing or no mid-shot decodes."""
+    ref = _png_pixels(ref_path)
+    if ref is None:
+        return None, None, None, None
+    zones = {"early": (110, 1090, 200, 1150),
+             "late": (150, 1090, 250, 1150)}
+    ref_means = {}
+    for name, (x0, y0, x1, y1) in zones.items():
+        v = _region_mean_lum(ref, x0, y0, x1, y1)
+        if v is None:
+            return None, None, None, None
+        ref_means[name] = v
+    best = None  # (darkening, zone, shot)
+    for shot in mid_paths:
+        png = _png_pixels(shot)
+        if png is None:
+            continue
+        for name, (x0, y0, x1, y1) in zones.items():
+            v = _region_mean_lum(png, x0, y0, x1, y1)
+            if v is None:
+                continue
+            dark = ref_means[name] - v
+            if best is None or dark > best[0]:
+                best = (dark, name, shot)
+    if best is None:
+        return None, None, None, None
+    dark, zone, shot = best
+    seen = 10.0 <= dark <= 60.0
+    return seen, round(dark, 1), zone, shot
+
+
+def capture_drag_logcat():
+    """Snapshot logcat IMMEDIATELY after the drag test, before the
+    ~40 s after-dump retry loop: the 1.17.1 re-probe's final capture
+    ran ~44 s after the drag and reels log spam had evicted every
+    RdxGramTheme line from the ring buffer (0 lines, even "drag
+    overlay attached" which the earlier probe did show). Writes
+    logcat-drag.txt (full dump) and logs the drag lines found, so
+    the evidence survives even if the final capture loses them. The
+    existing final capture in finish() is untouched. Returns the
+    matching lines (diagnostics only — no secrets)."""
+    out, _, _ = adb("logcat", "-d", timeout=90)
+    try:
+        with open("logcat-drag.txt", "w", encoding="utf-8") as fh:
+            fh.write(out)
+    except OSError:
+        pass
+    lines = [l.strip() for l in out.splitlines()
+             if "RdxGramTheme" in l and "drag" in l.lower()]
+    log(f"drag logcat snapshot: {len(lines)} drag line(s)")
+    for l in lines[:10]:
+        log(f"  {l[:200]}")
+    return lines
+
+
 def run_drag_test():
     """1.13 drag-lens acceptance test: slow horizontal drag across
     the tab bar, Home -> Reels. Screenshot mid-drag (the lens should
@@ -1085,8 +1339,26 @@ def run_drag_test():
     the swipe still runs between those coordinates (the bar is
     visibly present) and the result is DRAG_UNKNOWN_DUMP_FAILED
     when the after-dump cannot confirm the switch — the mid/after
-    screenshots are the evidence. The verdict stays honest: a switch
-    is only claimed when a dump shows Reels selected."""
+    screenshots are the evidence.
+
+    Fix #4 (1.17.1 re-probe): the drag DID switch, but the verdict
+    stayed DRAG_UNKNOWN_DUMP_FAILED — the after-dump failed, the
+    lens was not seen, and the logcat lines were evicted. So the
+    switch is now confirmed from the after-SCREENSHOT too
+    (DRAG_SWITCHED_VISUAL when it shows the Reels viewer,
+    DRAG_NO_SWITCH when it still shows the home feed), after one
+    late re-dump; DRAG_UNKNOWN_DUMP_FAILED is kept only when
+    neither the dump nor the screenshot confirms either outcome.
+    The dump alone cannot prove a Reels switch (measured: a
+    post-Reels-tap dump keeps Home selected=true and usually has
+    no "Reel by" text at +3 s), so a Home-selected dump does NOT
+    prove no-switch either — the screenshot is the primary switch
+    evidence. Two mid-shots (~40% and ~70%) bracket the gesture,
+    the lens is measured by pixel comparison against the tab-8
+    reference shot, and logcat is snapshotted immediately after
+    the drag (see capture_drag_logcat). The verdict stays honest:
+    a switch is claimed only from a dump showing Reels selected /
+    viewer text, or from an after-shot showing the Reels viewer."""
     drag_result = "DRAG_SKIPPED"
     try:
         nodes_drag = parse_dump(dump("step_drag0"))
@@ -1117,52 +1389,119 @@ def run_drag_test():
             x0, y0 = home_tab["center"]
             x1, y1 = reels_tab["center"]
             log(f"drag test: Home {home_tab['center']} -> "
-                f"Reels {reels_tab['center']} over 1200 ms")
+                f"Reels {reels_tab['center']} over {DRAG_SWIPE_MS} ms")
             subprocess.Popen(["adb", "-s", SER, "shell",
                               "input", "swipe",
                               str(x0), str(y0), str(x1), str(y1),
-                              "1200"])
-            time.sleep(0.48)  # ~40% through the swipe
+                              str(DRAG_SWIPE_MS)])
+            # Two mid-shots bracket the gesture (fix #4): the swipe
+            # only starts after the adb round-trip, and each
+            # screencap costs another one, so one shot is a gamble.
+            time.sleep(DRAG_MID1_S)  # ~40% through the swipe
             screenshot("shot_drag_mid")
-            # Swipe ends 1.2 s after it started; then wait the
-            # same 3 s the taps get, so the tab has time to settle
-            # (in the 1.12 dumps the Reels tab only reports
-            # selected=true once the viewer has fully loaded).
-            time.sleep(3.0)
+            time.sleep(DRAG_MID2_S - DRAG_MID1_S)  # ~70%
+            screenshot("shot_drag_mid2")
+            # The swipe ends 1.2 s after it started on-device; wait
+            # until DRAG_AFTER_S after Popen (the same total as
+            # before) so the tab has time to settle — in the 1.12
+            # dumps the Reels tab only reports selected=true once
+            # the viewer has fully loaded.
+            time.sleep(max(0.0, DRAG_AFTER_S - DRAG_MID2_S))
             screenshot("shot_drag_after")
-            nodes_drag_after = parse_dump(dump("step_drag_after"))
-            if not nodes_drag_after:
-                drag_result = "DRAG_UNKNOWN_DUMP_FAILED"
-                log("drag test: after-dump failed; switch "
-                    "unconfirmed (see shot_drag_after.png)")
-                STATUS["drag_test"] = {
-                    "result": drag_result,
-                    "from": list(home_tab["center"]),
-                    "to": list(reels_tab["center"]),
-                    "used_fallback_coords": used_fallback,
-                    "mid_shot": "shot_drag_mid.png",
-                    "after_shot": "shot_drag_after.png",
-                }
+            # Logcat FIRST, before the dump retries: the final
+            # capture in finish() runs ~40 s later, after the
+            # after-dump retry loop, and by then reels log spam
+            # has evicted the drag lines (1.17.1 re-probe: 0
+            # RdxGramTheme lines in logcat-final.txt).
+            drag_lines = capture_drag_logcat()
+            # The lens is measured, not just eyeballed: compare the
+            # mid-shots against the pre-drag Home shot (the bar is
+            # static, so the reference zones are stable to <1 unit).
+            lens_seen, lens_dark, lens_zone, lens_shot = \
+                detect_lens_in_shots(
+                    ["shot_drag_mid.png", "shot_drag_mid2.png"],
+                    "shot_tab08_home.png")
+            if lens_seen is None:
+                log("drag test: lens check skipped (no reference shot)")
             else:
+                log(f"drag test: lens seen={lens_seen} "
+                    f"(darkening {lens_dark} in {lens_zone} zone of "
+                    f"{lens_shot})")
+            nodes_drag_after = parse_dump(dump("step_drag_after"))
+            late_dump = False
+            if not nodes_drag_after:
+                # The after-dump failed (reels SurfaceView): wait
+                # for the SurfaceView to settle and re-dump ONCE
+                # before giving up on the dump path.
+                log("drag test: after-dump failed; waiting 5s and "
+                    "re-dumping once (SurfaceView may settle)")
+                time.sleep(5)
+                nodes_drag_after = parse_dump(dump("step_drag_after2"))
+                late_dump = nodes_drag_after is not None
+            drag_info = {
+                "from": list(home_tab["center"]),
+                "to": list(reels_tab["center"]),
+                "used_fallback_coords": used_fallback,
+                "mid_shot": "shot_drag_mid.png",
+                "mid_shot2": "shot_drag_mid2.png",
+                "after_shot": "shot_drag_after.png",
+                "lens_seen": lens_seen,
+                "lens_darkening": lens_dark,
+                "lens_zone": lens_zone,
+                "logcat_drag_lines": len(drag_lines),
+                "late_dump": late_dump,
+            }
+            switched_by_dump = False
+            dump_evidence = None
+            if nodes_drag_after:
                 selected = [n["desc"] for n in nodes_drag_after
                             if n.get("selected")
                             and n["desc"] in
                             ("Home", "Reels", "Message",
                              "Search and explore", "Profile")]
-                switched = "Reels" in selected
-                drag_result = ("DRAG_SWITCHED_TO_REELS"
-                               if switched else "DRAG_NO_SWITCH")
-                log(f"drag test: {drag_result} "
-                    f"(selected now: {selected})")
-                STATUS["drag_test"] = {
-                    "result": drag_result,
-                    "from": list(home_tab["center"]),
-                    "to": list(reels_tab["center"]),
-                    "selected_after": selected,
-                    "used_fallback_coords": used_fallback,
-                    "mid_shot": "shot_drag_mid.png",
-                    "after_shot": "shot_drag_after.png",
-                }
+                drag_info["selected_after"] = selected
+                low_text = low(nodes_drag_after)
+                if "Reels" in selected:
+                    switched_by_dump = True
+                    dump_evidence = f"dump: Reels selected {selected}"
+                elif ("reel by" in low_text or
+                        "double tap to play or pause" in low_text):
+                    # The viewer is up even though the bar still
+                    # reports Home selected (measured: post-Reels-tap
+                    # dumps keep Home selected and usually have no
+                    # viewer text at +3 s — the late retry is the
+                    # one that can catch it once loaded).
+                    switched_by_dump = True
+                    dump_evidence = "dump: Reels viewer text present"
+            if switched_by_dump:
+                drag_result = "DRAG_SWITCHED_TO_REELS"
+                log(f"drag test: {drag_result} ({dump_evidence})")
+                drag_info["dump_evidence"] = dump_evidence
+                drag_info["result"] = drag_result
+            else:
+                # No dump evidence either way: a Home-selected dump
+                # does NOT prove no-switch (measured: a successful
+                # Reels tap leaves Home selected), so judge the
+                # switch from the after-screenshot itself.
+                shot_label, shot_ev = detect_drag_switch_from_shot(
+                    "shot_drag_after.png")
+                drag_info["shot_label"] = shot_label
+                drag_info["shot_evidence"] = shot_ev
+                if shot_label == "reels":
+                    drag_result = "DRAG_SWITCHED_VISUAL"
+                    log(f"drag test: {drag_result} (after-shot "
+                        f"shows the Reels viewer: {shot_ev})")
+                elif shot_label == "home":
+                    drag_result = "DRAG_NO_SWITCH"
+                    log(f"drag test: {drag_result} (after-shot "
+                        f"still shows the home feed: {shot_ev})")
+                else:
+                    drag_result = "DRAG_UNKNOWN_DUMP_FAILED"
+                    log("drag test: after-dump failed and the "
+                        "after-shot is ambiguous; switch "
+                        "unconfirmed (see shot_drag_after.png)")
+                drag_info["result"] = drag_result
+            STATUS["drag_test"] = drag_info
         else:
             log("drag test skipped: Home/Reels tab not found")
             STATUS["drag_test"] = {"result": "DRAG_SKIPPED"}
