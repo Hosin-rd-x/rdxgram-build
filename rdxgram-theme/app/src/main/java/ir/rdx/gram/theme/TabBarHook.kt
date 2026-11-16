@@ -89,6 +89,7 @@ object TabBarHook {
     private const val TAG_SAVED_STATE = 0x7e1e0301
     private const val TAG_APPLIED_SIGNATURE = 0x7e1e0302
     private const val TAG_PILL_NIGHT = 0x7e1e0303 // Boolean: which theme the tab's pill was built for
+    private const val TAG_CAPSULE_DRAWABLE = 0x7e1e0304 // The capsule GradientDrawable last painted on the bar
 
     private val watchedDecors: MutableSet<View> =
         Collections.newSetFromMap(WeakHashMap<View, Boolean>())
@@ -148,7 +149,16 @@ object TabBarHook {
                 if (cached != null && activityOf(cached) == a && styledBars.contains(cached)
                     && Settings.isBarEnabled(a)
                 ) {
-                    refreshHighlight(cached, isNight(cached))
+                    // If Instagram's tab-bar controller replaced our capsule
+                    // background with a flat color, re-apply now instead of only
+                    // refreshing the highlight — so the flat flicker lasts at
+                    // most one layout pass, not until the next 400 ms sweep.
+                    val appliedCapsule = cached.getTag(TAG_CAPSULE_DRAWABLE) as? Drawable
+                    if (cached.background === appliedCapsule) {
+                        refreshHighlight(cached, isNight(cached))
+                    } else {
+                        apply(cached)
+                    }
                 }
                 if (!Settings.isBarEnabled(a) && styledBars.isEmpty()) return@addOnGlobalLayoutListener
                 if (!pendingSweeps.add(decor)) return@addOnGlobalLayoutListener
@@ -254,7 +264,14 @@ object TabBarHook {
             val radiusPx = dp(bar, radius)
             val signature = (if (night) 0x10000 else 0) or radiusPx
             val applied = bar.getTag(TAG_APPLIED_SIGNATURE)
-            if (applied is Int && applied == signature && styledBars.contains(bar)) {
+            // The capsule we painted is remembered on the bar. Instagram's own
+            // tab-bar controller (X/00YD.A0K -> A0P) replaces any background
+            // that is not its X/00xO drawable with a flat color, so a matching
+            // signature alone does NOT prove the capsule is still there.
+            // Re-apply when the background is not ours.
+            val appliedCapsule = bar.getTag(TAG_CAPSULE_DRAWABLE) as? Drawable
+            if (applied is Int && applied == signature && styledBars.contains(bar)
+                && bar.background === appliedCapsule) {
                 // Same theme, same size — only the selected tab may have moved.
                 refreshHighlight(bar, night)
                 return
@@ -287,6 +304,7 @@ object TabBarHook {
                 capsule.setStroke(dp(bar, 1), Color.argb(26, 0, 0, 0)) // black, 10%
             }
             bar.background = capsule
+            bar.setTag(TAG_CAPSULE_DRAWABLE, capsule)
 
             // Float it: side margins + a gap above the bottom edge, ADDED to whatever
             // margins Instagram already gave the bar. Instagram runs edge-to-edge, so the
@@ -479,6 +497,7 @@ object TabBarHook {
             }
             bar.setTag(TAG_SAVED_STATE, null)
             bar.setTag(TAG_APPLIED_SIGNATURE, null)
+            bar.setTag(TAG_CAPSULE_DRAWABLE, null)
             styledBars.remove(bar)
             RdxLog.d("restored stock bar")
         } catch (ignored: Throwable) {
