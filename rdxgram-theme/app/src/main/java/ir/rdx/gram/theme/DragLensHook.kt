@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
@@ -22,6 +23,9 @@ import kotlin.math.min
  * Full drag animation between tabs for RdxGram (the "drag lens").
  * 1.17: the overlay attaches to the window decor, never inside the bar —
  * the 1.13/1.16 bisect proved the bar-child attach emptied the tab bar.
+ * 1.17.1: the overlay owns the gesture by consuming DOWN (see below) —
+ * the 1.17 intercept-on-MOVE design could never fire for a sibling
+ * overlay (re-probe 4: swipe never showed a lens, never switched tabs).
  * See the attach() doc below.
  *
  * Stock Instagram 451 has NO drag on the tab bar — tabs only switch on
@@ -39,15 +43,24 @@ import kotlin.math.min
  *    outside the bar controller's reach: it never rebuilds the decor's
  *    children, and attaching a view there (the same class of operation
  *    as FullScreenHook's window work, cleared by the 1.15 probe) leaves
- *    the bar's children untouched. It is a ViewGroup that does NOT
- *    intercept on DOWN — the tap reaches the tab underneath normally,
- *    so plain taps, press states and long-press all behave exactly as
- *    stock. Only once the finger has moved horizontally past an 8dp
- *    threshold (and further sideways than vertically) does it
- *    intercept; the framework then sends the tab an ACTION_CANCEL, and
- *    the drag belongs to the overlay. Because the overlay covers the
- *    bar exactly, its touch coordinates ARE the bar's coordinates, so
- *    tab lookup needs no conversion.
+ *    the bar's children untouched. It is a ViewGroup that OWNS every
+ *    gesture by consuming DOWN (1.17.1): the 1.17 design tried to NOT
+ *    intercept on DOWN and intercept only once the finger had moved
+ *    horizontally past an 8dp threshold — that can never work for a
+ *    sibling overlay. Android delivers a gesture's MOVE/UP events only
+ *    through the ancestors of the view that received DOWN, and a
+ *    sibling overlay's onInterceptTouchEvent is consulted exactly once
+ *    per gesture (for the DOWN it returns false for), so the drag
+ *    machine was unreachable dead code: re-probe 4 proved the swipe
+ *    never showed a lens and never switched tabs, while all 8 taps
+ *    landed fine. So now onTouchEvent returns true for ACTION_DOWN
+ *    (the overlay becomes the touch target), plain taps are emulated
+ *    with performClick on UP, long-press is forwarded with
+ *    performLongClick after the system timeout, and only a horizontal
+ *    move past 8dp (further sideways than vertically) starts the
+ *    drag. Because the overlay covers the bar exactly, its touch
+ *    coordinates ARE the bar's coordinates, so tab lookup needs no
+ *    conversion.
  *  - while dragging, a glass lens pill follows the finger's x (with a
  *    small stretch, up to ~12%, the further it is pulled from where
  *    the drag started);
@@ -57,8 +70,11 @@ import kotlin.math.min
  *    OvershootInterpolator spring, then fades away;
  *  - on release without crossing a midpoint the finger's tab is the
  *    target anyway (nearest tab wins), so a drag always lands on a tab;
- *  - long-press passes through untouched: no movement means no
- *    intercept, so the tab's own long-press fires as stock;
+ *  - long-press is forwarded: if the finger stays down past the
+ *    system long-press timeout without dragging, the tab under the
+ *    finger gets performLongClick — the same path a real long-press
+ *    ends in (the tab never gets DOWN directly, the overlay owns the
+ *    gesture, so it must forward both tap and long-press itself);
  *  - TalkBack is unaffected: the overlay reports
  *    IMPORTANT_FOR_ACCESSIBILITY_NO and the tabs stay readable.
  *
@@ -113,14 +129,27 @@ object DragLensHook {
             // Different bar (Instagram rebuilt it), or the overlay was
             // dropped: retire the stale one before arming a new one.
             retireOverlay()
-            if (tabCenters(bar).size < 2) return // cannot resolve targets: leave taps alone
-            if (bar.width <= 0 || bar.height <= 0) return // not laid out yet
+            if (tabCenters(bar).size < 2) {
+                RdxLog.d("drag attach skipped: fewer than 2 tab centres resolve")
+                return // cannot resolve targets: leave taps alone
+            }
+            if (bar.width <= 0 || bar.height <= 0) {
+                RdxLog.d("drag attach skipped: bar not laid out yet")
+                return // not laid out yet
+            }
             // The decor is the window root (a FrameLayout by
             // construction); absolute positioning via margins is safe
             // there and never disturbs the content layout. rootView is
             // the bar itself while it is not attached to a window yet.
-            val decor = bar.rootView as? ViewGroup ?: return
-            if (decor === bar) return
+            val decor = bar.rootView as? ViewGroup
+            if (decor == null) {
+                RdxLog.d("drag attach skipped: no decor (rootView is not a ViewGroup)")
+                return
+            }
+            if (decor === bar) {
+                RdxLog.d("drag attach skipped: decor is the bar itself (not attached to a window yet)")
+                return
+            }
             val overlay = DragOverlay(bar)
             overlay.isClickable = false
             overlay.isFocusable = false
@@ -130,6 +159,12 @@ object DragLensHook {
             attachedOverlay = overlay
             attachedBarRef = WeakReference(bar)
             bar.setTag(TAG_DRAG_OVERLAY, overlay)
+            val lp = overlay.layoutParams as? FrameLayout.LayoutParams
+            RdxLog.d(
+                "drag overlay attached: bar " + bar.width + "x" + bar.height +
+                    " overlay " + (lp?.width ?: -1) + "x" + (lp?.height ?: -1) +
+                    " margins (" + (lp?.leftMargin ?: -1) + "," + (lp?.topMargin ?: -1) + ")"
+            )
         } catch (ignored: Throwable) {
         }
     }
@@ -270,11 +305,19 @@ object DragLensHook {
     }
 
     /**
-     * The overlay itself. A FrameLayout so it can use
-     * onInterceptTouchEvent: DOWN passes through to the tabs, and only a
-     * real horizontal drag is intercepted (the tab then gets
-     * ACTION_CANCEL from the framework, exactly as if the finger had
-     * slid off it).
+     * The overlay itself. A FrameLayout that OWNS every gesture by
+     * consuming DOWN in onTouchEvent (1.17.1): it returns true for
+     * ACTION_DOWN, so it becomes the touch target and all later
+     * MOVE/UP events come here directly. The 1.17 design tried to let
+     * DOWN pass through to the tabs and intercept only on MOVE — that
+     * can never work for a sibling overlay (Android only consults
+     * onInterceptTouchEvent once per gesture, for the DOWN), so the
+     * drag machine was unreachable dead code. Taps are emulated with
+     * performClick on UP and long-press is forwarded with
+     * performLongClick after the system timeout, since the tab itself
+     * never receives DOWN any more. Cosmetic cost: the tab's
+     * pressed-state drawable does not show during the touch; the
+     * highlight pill still moves on selection.
      */
     private class DragOverlay(private val bar: ViewGroup) : FrameLayout(bar.context) {
 
@@ -282,9 +325,23 @@ object DragLensHook {
         private var downY = 0f
         private var activePointerId = MotionEvent.INVALID_POINTER_ID
         private var dragging = false
+        private var longPressFired = false
         private var lensVisible = false
         private var lensX = 0f
         private var settleAnimator: ValueAnimator? = null
+
+        // Long-press passthrough: if the finger stays down past the
+        // system long-press timeout without dragging, the tab under the
+        // finger gets its long-press.
+        private val longPressRunnable = Runnable {
+            try {
+                if (!dragging && activePointerId != MotionEvent.INVALID_POINTER_ID) {
+                    longPressFired = true
+                    DragLensHook.nearestTab(bar, downX)?.performLongClick()
+                }
+            } catch (ignored: Throwable) {
+            }
+        }
 
         private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -296,69 +353,84 @@ object DragLensHook {
         }
 
         override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+            // 1.17.1: nothing to intercept here. The overlay owns the
+            // gesture by consuming DOWN in onTouchEvent, so once it is
+            // the touch target this method is never consulted for
+            // MOVE/UP. (The 1.17 design tried to intercept on MOVE
+            // after a pass-through DOWN — impossible for a sibling
+            // overlay: Android consults this exactly once per gesture,
+            // for the DOWN, and MOVE/UP then flow to the view that got
+            // DOWN. See the class doc.)
+            return false
+        }
+
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            // 1.17.1: the overlay MUST own the gesture — a sibling
+            // overlay can never intercept one (see the class doc).
+            // Returning true for DOWN makes the overlay the touch
+            // target, so all later MOVE/UP events come here directly.
             try {
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         cancelSettle()
+                        removeCallbacks(longPressRunnable)
                         activePointerId = ev.getPointerId(0)
                         downX = ev.x
                         downY = ev.y
                         dragging = false
-                        // Do NOT intercept: the tap (and a possible
-                        // long-press) belongs to the tab underneath.
-                        return false
+                        longPressFired = false
+                        postDelayed(
+                            longPressRunnable,
+                            ViewConfiguration.getLongPressTimeout().toLong()
+                        )
+                        RdxLog.d("drag DOWN received at (" + downX + "," + downY + ")")
+                        return true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        if (activePointerId == MotionEvent.INVALID_POINTER_ID) return false
+                        if (activePointerId == MotionEvent.INVALID_POINTER_ID) return true
                         val idx = ev.findPointerIndex(activePointerId)
-                        if (idx < 0) return false
+                        if (idx < 0) return true
                         val dx = ev.getX(idx) - downX
                         val dy = ev.getY(idx) - downY
                         if (!dragging && abs(dx) > dp(DragLensHook.DRAG_THRESHOLD_DP) && abs(dx) > abs(dy)) {
-                            if (DragLensHook.tabCenters(bar).size < 2) return false
+                            if (DragLensHook.tabCenters(bar).size < 2) return true
+                            removeCallbacks(longPressRunnable)
                             dragging = true
                             lensVisible = true
                             lensX = clampX(ev.getX(idx))
                             invalidate()
-                            // From here the gesture is ours; the framework
-                            // cancels the tab's pressed state for us.
+                            RdxLog.d("drag started, lensX=" + lensX)
                             return true
                         }
                         if (dragging) {
                             lensX = clampX(ev.getX(idx))
                             invalidate()
-                            return true
                         }
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        activePointerId = MotionEvent.INVALID_POINTER_ID
-                    }
-                }
-            } catch (ignored: Throwable) {
-            }
-            return false
-        }
-
-        override fun onTouchEvent(ev: MotionEvent): Boolean {
-            // Only reached after an intercept — i.e. only while dragging.
-            try {
-                when (ev.actionMasked) {
-                    MotionEvent.ACTION_MOVE -> {
-                        if (!dragging) return false
-                        val idx = ev.findPointerIndex(activePointerId)
-                        if (idx < 0) return true
-                        lensX = clampX(ev.getX(idx))
-                        invalidate()
                         return true
                     }
                     MotionEvent.ACTION_UP -> {
-                        if (!dragging) return false
-                        dragging = false
+                        removeCallbacks(longPressRunnable)
+                        if (activePointerId == MotionEvent.INVALID_POINTER_ID) return true
                         activePointerId = MotionEvent.INVALID_POINTER_ID
-                        release(lensX)
+                        if (dragging) {
+                            dragging = false
+                            release(lensX)
+                        } else if (!longPressFired) {
+                            // It was a tap: the tab never got DOWN (we
+                            // own the gesture), so deliver the tap the
+                            // same way a real tap ends — performClick
+                            // on the tab under the finger.
+                            val tapped = DragLensHook.nearestTab(bar, downX)
+                            val clicked = tapped?.performClick() ?: false
+                            RdxLog.d(
+                                "drag tap emulated at x=" + downX +
+                                    " performClick=" + clicked
+                            )
+                        }
                         return true
                     }
                     MotionEvent.ACTION_CANCEL -> {
+                        removeCallbacks(longPressRunnable)
                         dragging = false
                         activePointerId = MotionEvent.INVALID_POINTER_ID
                         hideLens()
@@ -380,14 +452,18 @@ object DragLensHook {
                     targetCentre = target.left + target.width / 2f
                     // The same path a tap takes — no private API, no
                     // ViewPager call, so the tab's own state machine runs.
-                    target.performClick()
+                    val clicked = target.performClick()
+                    RdxLog.d(
+                        "drag release: targetCentre=" + targetCentre +
+                            " performClick=" + clicked
+                    )
                 }
             } catch (ignored: Throwable) {
             }
             if (target == null) {
                 // No resolvable target: fall back to doing nothing rather
-                // than clicking the wrong thing. The tap the drag started
-                // from was already cancelled, so this drag just ends.
+                // than clicking the wrong thing. The drag just ends.
+                RdxLog.d("drag release: no resolvable target at x=" + x)
                 hideLens()
                 return
             }
