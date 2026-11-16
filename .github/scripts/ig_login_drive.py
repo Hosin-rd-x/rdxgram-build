@@ -34,6 +34,10 @@ If a tab is not found the driver re-dumps in place and relaunches if
 the app left the foreground — it NEVER presses BACK on the feed,
 because BACK exits the app to the launcher and poisons every later
 screenshot (1.13 probe: all 8 tab shots were the launcher).
+1.15: if a first-run promo sheet ("Introducing instants") covers the
+tab bar mid-sequence, the driver dismisses it with its exact "Not
+now" secondary action and retries the tab once (the 1.14 probe's
+tabs 4-8 died on that sheet).
 Finally it checks the log for FATAL crashes (CRASHED_AFTER_FEED if any
 appear).
 
@@ -261,6 +265,26 @@ def app_foreground(nodes):
     not an app failure)."""
     return any((n.get("resource") or "").startswith(
         ("com.rdx.gram", "com.instagram")) for n in nodes)
+
+
+def dismiss_sheet(nodes, tag):
+    """Dismiss a first-run promo sheet covering the tab bar (e.g. the
+    "Introducing instants" dialog from the 1.14 probe) by tapping its
+    exact "Not now" secondary action. Only that label is ever matched
+    — never "Try it" or any primary action — and the feed itself has
+    no clickable "Not now" node (suggested cards say "Dismiss"), so
+    the match is safe on a healthy feed. Returns fresh nodes after a
+    dismissal, or None if no sheet was found."""
+    btn = find_exact(nodes, "Not now")
+    if not btn:
+        return None
+    log(f"first-run sheet present; dismissing with 'Not now' "
+        f"({btn['resource'] or 'no resource-id'})")
+    tap(*btn["center"])
+    time.sleep(2)
+    STATUS.setdefault("sheets_dismissed", []).append("Not now")
+    save_status()
+    return parse_dump(dump(tag))
 
 
 def find_edit(nodes, *desc_prefixes):
@@ -619,6 +643,17 @@ def main():
                         tab = find_tab(nodes_cur, desc)
                         if tab:
                             break
+                if not tab:
+                    # A first-run promo sheet (e.g. "Introducing
+                    # instants") can cover the tab bar DURING the
+                    # loop — the 1.14 probe's tabs 4-8 died on it —
+                    # so the main loop's tap_skip never sees it.
+                    # Dismiss it here and retry the tab once.
+                    fresh = dismiss_sheet(nodes_cur,
+                                          f"step_tab{i:02d}sheet")
+                    if fresh is not None:
+                        nodes_cur = fresh
+                        tab = find_tab(nodes_cur, desc)
                 if not tab and not app_foreground(nodes_cur):
                     # We are no longer in the app at all: relaunch and
                     # try once more instead of screenshotting the
@@ -671,6 +706,14 @@ def main():
                 nodes_drag = parse_dump(dump("step_drag0"))
                 home_tab = find_tab(nodes_drag, "Home")
                 reels_tab = find_tab(nodes_drag, "Reels")
+                if not home_tab or not reels_tab:
+                    # A first-run sheet may be covering the bar here
+                    # too; dismiss it and retry once.
+                    fresh = dismiss_sheet(nodes_drag, "step_drag_sheet")
+                    if fresh is not None:
+                        nodes_drag = fresh
+                        home_tab = find_tab(nodes_drag, "Home")
+                        reels_tab = find_tab(nodes_drag, "Reels")
                 if home_tab and reels_tab:
                     x0, y0 = home_tab["center"]
                     x1, y1 = reels_tab["center"]

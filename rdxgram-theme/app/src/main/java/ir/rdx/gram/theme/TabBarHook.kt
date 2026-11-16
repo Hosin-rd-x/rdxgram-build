@@ -59,6 +59,19 @@ import java.util.WeakHashMap
  * reach reliably here. The look is a translucent capsule, not native glass.
  * If a Compose view ever covers the bar, the capsule is hidden behind it;
  * that case is logged and only a phone test can settle it.
+ *
+ * 1.15 adds ONLY FullScreenHook, in the same spirit and the same file's
+ * sweep path: transparent status/navigation bars, content laid out under
+ * both, a very light top gradient scrim (an honest stand-in for a soft
+ * blur behind the status icons — see FullScreenHook's doc, it is a
+ * scrim, not a blur), and the feed pager grown so content scrolls UNDER
+ * the capsule while the area behind the capsule stays fully transparent.
+ * the drag lens is still absent: the 1.14 probe cleared the capsule
+ * alone, so full-screen and the drag lens are added one at a time to
+ * find which one emptied the tab bar in 1.13.
+ * The 1.11 capsule fix (TAG_CAPSULE_DRAWABLE identity check) is intact
+ * and still the only thing standing between the capsule and Instagram's
+ * own tab-bar controller replacing its background with a flat colour.
  */
 object TabBarHook {
 
@@ -206,6 +219,13 @@ object TabBarHook {
     private fun sweep(a: Activity?) {
         // The debounced runnable can outlive its activity (rotation, quick back press).
         if (a == null || a.isFinishing || a.isDestroyed) return
+        // Full-screen runs on every sweep too (not only when the bar is
+        // found): the feed geometry is per-tab and Instagram resets it as
+        // you navigate, so it needs the same re-application rhythm.
+        try {
+            FullScreenHook.apply(a)
+        } catch (ignored: Throwable) {
+        }
         try {
             val root = a.window?.decorView as? ViewGroup ?: return
             var bar = cachedBar()
