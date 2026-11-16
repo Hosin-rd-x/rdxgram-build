@@ -25,8 +25,13 @@ once more for a fresh code and then ends with CODE_REJECTED. The code
 value itself is never logged, printed, or written to any output file.
 
 After a successful login the driver lets the feed settle a few seconds,
-screenshots home / explore / profile, and checks the log for FATAL
-crashes (CRASHED_AFTER_FEED if any appear).
+then runs the capsule-fix acceptance sequence: 8 tab taps
+home -> reels -> direct -> profile -> home -> reels -> direct -> home,
+with a screenshot AND a UI dump after EVERY tap. (The 1.10/1.11 probes
+only did feed -> explore -> profile -> feed, so the suspected trigger
+tabs reels/direct were never visited and the fix stayed unproven.)
+Finally it checks the log for FATAL crashes (CRASHED_AFTER_FEED if any
+appear).
 
 After a successful login Android may also show the system
 notification-permission dialog ("Allow Rdx gram to send you
@@ -217,6 +222,28 @@ def find_exact(nodes, *labels):
                 return n
             if n["desc"].strip().lower() == lab.lower():
                 return n
+    return None
+
+
+def find_tab(nodes, desc):
+    """Bottom-nav tab by EXACT content-desc, restricted to the bottom bar.
+
+    The tab bar in the 1.11 probe dumps is five clickable FrameLayouts at
+    y 1072-1168 of a 1280-high screen, descs Home / Reels / Message /
+    Search and explore / Profile. Exact-desc matching avoids content nodes
+    like "Reel by ..." and the bottom-bar check avoids feed content.
+    Returns the node or None."""
+    h = 0
+    for n in nodes:
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n["bounds"])
+        if m:
+            h = max(h, int(m.group(4)))
+    bar_top = 0.8 * h if h else 0
+    for n in nodes:
+        if not n["clickable"] or n["center"] is None:
+            continue
+        if n["desc"].strip() == desc and n["center"][1] >= bar_top:
+            return n
     return None
 
 
@@ -546,28 +573,59 @@ def main():
             log("HOME FEED REACHED — login succeeded; letting it settle")
             time.sleep(5)
             screenshot("shot_feed")
-            home = find(nodes, "Search and explore")
-            if home:
-                tap(*home["center"])
-                time.sleep(3)
-                screenshot("shot_explore")
-            nodes2 = parse_dump(dump("step_explore"))
-            prof = find(nodes2, "Profile")
-            if prof:
-                tap(*prof["center"])
-                time.sleep(3)
-                screenshot("shot_profile")
-            nodes3 = parse_dump(dump("step_home2"))
-            hm = find(nodes3, "Home")
-            if hm:
-                tap(*hm["center"])
-                time.sleep(2)
-                screenshot("shot_feed2")
-            if not check_alive("feed screenshots"):
+            # 1.11 capsule-fix acceptance test: 8 tab taps
+            # home -> reels -> direct -> profile -> home -> reels ->
+            # direct -> home, screenshot + UI dump after EVERY tap.
+            # The 1.10/1.11 probes only did feed -> explore -> profile ->
+            # feed, so the suspected trigger tabs (reels/direct) were
+            # never visited and the fix stayed unproven.
+            sequence = [
+                ("home", "Home"), ("reels", "Reels"),
+                ("direct", "Message"), ("profile", "Profile"),
+                ("home", "Home"), ("reels", "Reels"),
+                ("direct", "Message"), ("home", "Home"),
+            ]
+            for i, (name, desc) in enumerate(sequence, 1):
+                nodes_cur = parse_dump(dump(f"step_tab{i:02d}"))
+                tab = find_tab(nodes_cur, desc)
+                if not tab:
+                    # The tab bar can hide behind a full-screen viewer
+                    # (e.g. Reels): BACK once and look again.
+                    log(f"tab {name} not found; pressing BACK and "
+                        f"retrying once")
+                    keyevent(4)
+                    time.sleep(1.5)
+                    nodes_cur = parse_dump(dump(f"step_tab{i:02d}b"))
+                    tab = find_tab(nodes_cur, desc)
+                if tab:
+                    log(f"tap {i}/8: {name}")
+                    tap(*tab["center"])
+                    time.sleep(3)
+                else:
+                    log(f"tab {name} still not found; capturing "
+                        f"current screen as-is")
+                nodes_after = parse_dump(dump(f"step_tab{i:02d}after"))
+                if classify(nodes_after) == "NOTIF_DIALOG":
+                    btn = find_exact(nodes_after, "Don't allow",
+                                     "Don’t allow") or \
+                        find(nodes_after, "Don't allow")
+                    if btn:
+                        log("notification-permission dialog appeared "
+                            "mid-sequence; tapping Don't allow")
+                        tap(*btn["center"])
+                        time.sleep(2)
+                        nodes_after = parse_dump(
+                            dump(f"step_tab{i:02d}after2"))
+                screenshot(f"shot_tab{i:02d}_{name}")
+                if not pid_alive():
+                    return finish("CRASHED_AFTER_FEED",
+                                  f"process died during tab sequence "
+                                  f"(tap {i}/8: {name})")
+            if not check_alive("8-tap tab sequence"):
                 return finish("CRASHED_AFTER_FEED",
-                              "FATAL or dead process after reaching feed")
-            return finish("LOGGED_IN_FEED", "home feed + explore + profile "
-                          "captured")
+                              "FATAL or dead process after tab sequence")
+            return finish("LOGGED_IN_FEED", "home feed + 8-tap sequence "
+                          "captured (home/reels/direct/profile x2)")
 
         if state == "WRONG_PASSWORD":
             screenshot("shot_wrong_password")
