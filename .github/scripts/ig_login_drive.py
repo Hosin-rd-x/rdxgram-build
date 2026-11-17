@@ -156,7 +156,10 @@ STATUS = {"status": "STARTED", "cold_start_total_ms": None, "fatal_count": 0,
           "steps": 0, "screenshots": [], "started_at": int(time.time()),
           "finished_at": None, "last_screen": None, "detail": "",
           "code_destination_masked": None, "code_attempts": 0,
-          "code_source": None}
+          "code_source": None,
+          # 1.19.2: per-switch geometry assertions (see
+          # check_geometry); any BROKEN fails the run.
+          "geometry_assertions": {}, "geometry_broken": False}
 # Bottom-bar tab descs, and their centers from the last dump that had
 # them (see remember_tabs). 1.17 re-probe 3: dumps fail while the
 # reels video SurfaceView is active, so the last-known centers are
@@ -1224,6 +1227,14 @@ def tap_sequence_tab(i, name, desc):
         else:
             log("reel viewer still up mid-sequence after BACK "
                 "attempts; continuing with the next tab")
+    # 1.19.2: tab-switch geometry acceptance — after every tap the
+    # settled screen must be geometrically sound (feed at y=0, header
+    # below the status bar, tray below the header, capsule visible
+    # with all 5 tabs drawn above the feed). The 1.19.1 probe was
+    # CLEAN on colour spreads alone while this bug class was live on
+    # the phone; a failed assertion fails the whole run (see main()).
+    if nodes_after:
+        check_geometry(nodes_after, f"tap{i}_{name}")
     screenshot(f"shot_tab{i:02d}_{name}")
     if not pid_alive():
         return nodes_after, True
@@ -1467,6 +1478,170 @@ def detect_flat_bar_frame(path):
     return "capsule", ev
 
 
+def _rect(node):
+    """Bounds string '[l,t][r,b]' -> (l, t, r, b), or None."""
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds", ""))
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _res_node(nodes, suffix):
+    """First node whose resource-id ends with the given suffix."""
+    for n in nodes:
+        if n.get("resource", "").endswith(suffix):
+            return n
+    return None
+
+
+def check_geometry(nodes, label):
+    """1.19.2 tab-switch geometry acceptance: after a tab switch the
+    settled screen must be geometrically sound — the bug class the
+    1.19.1 probe was CLEAN on while it was live on Hossein's phone
+    (feed pushed ~156dp down with a black band on top, wordmark
+    missing, capsule gone; Reels fine 10 min later). The colour-spread
+    burst test cannot see any of that, so this asserts MEASURED
+    geometry from the dump:
+
+      * the capsule bar: all 5 tabs present, sharing one band in the
+        bottom fifth of the screen, AND the bar the last child of the
+        wrapper (later child = painted on top — the 1.19.1 probe dump
+        ui_step_tab04after proves Instagram re-orders the wrapper's
+        children on tab switches; a bar painted over is invisible
+        even with the right background);
+      * the home feed (when the stories tray is present): the header
+        exists and sits just below the status bar (top 40-56 px on
+        the 720x1280 emulator, where the bar is 48), the tray is never
+        far below the header (one-sided on purpose: for one sweep
+        after a switch it is still at the pre-shift position, header
+        bottom − 48), and the feed list starts at y=0.
+
+    Selection is deliberately NOT asserted: post-Reels-tap dumps keep
+    Home selected=true for seconds (1.17.1 lesson), so selection lags
+    reality. A screen with no bar at all (full-screen reel viewer,
+    dialog) is SKIPPED, not failed — the caller only runs this on
+    settled tab screens. Returns the recorded dict, and stores it in
+    STATUS['geometry_assertions'][label]; any BROKEN sets
+    STATUS['geometry_broken'], which fails the whole run in main()."""
+    result = {"label": label, "result": "SKIPPED", "measured": {},
+              "failures": []}
+    if not nodes:
+        result["note"] = "no dump (nodes empty)"
+        STATUS.setdefault("geometry_assertions", {})[label] = result
+        return result
+    screen_w = 0
+    screen_h = 0
+    for n in nodes:
+        r = _rect(n)
+        if r:
+            screen_w = max(screen_w, r[2])
+            screen_h = max(screen_h, r[3])
+    result["measured"]["screen"] = [screen_w, screen_h]
+    failures = result["failures"]
+
+    # --- capsule bar: all 5 tabs, one band, bottom fifth ---
+    tabs = {}
+    for desc in TAB_DESCS:
+        node = find_tab(nodes, desc)
+        if node:
+            tabs[desc] = node
+    if not tabs:
+        # No bar on this screen (viewer / dialog): nothing to assert.
+        result["note"] = "no tab bar in dump (viewer or dialog?)"
+        STATUS.setdefault("geometry_assertions", {})[label] = result
+        return result
+    if len(tabs) < 5:
+        failures.append("only %d/5 tabs visible: %s"
+                        % (len(tabs), sorted(tabs)))
+    tops = []
+    bottoms = []
+    for desc, node in tabs.items():
+        r = _rect(node)
+        if r:
+            tops.append(r[1])
+            bottoms.append(r[3])
+    if tops and bottoms:
+        result["measured"]["tab_tops"] = [min(tops), max(tops)]
+        result["measured"]["tab_bottoms"] = [min(bottoms), max(bottoms)]
+        if max(tops) - min(tops) > 4:
+            failures.append("tab tops not aligned: %s" % sorted(tops))
+        if max(bottoms) - min(bottoms) > 4:
+            failures.append("tab bottoms not aligned: %s" % sorted(bottoms))
+        if screen_h and min(tops) < 0.80 * screen_h:
+            failures.append("tab band too high (top %d of %d)"
+                            % (min(tops), screen_h))
+        if screen_h and max(bottoms) > screen_h:
+            failures.append("tab band below screen bottom (%d of %d)"
+                            % (max(bottoms), screen_h))
+
+    # --- wrapper child order: the bar must be painted last ---
+    idx = {}
+    for suffix, key in (("id/swipeable_tab_view_pager", "pager"),
+                        ("id/layout_container_main", "container"),
+                        ("id/tab_bar", "bar")):
+        for i, n in enumerate(nodes):
+            if n.get("resource", "").endswith(suffix):
+                idx[key] = i
+                break
+    result["measured"]["wrapper_order"] = idx
+    if len(idx) == 3:
+        if idx["bar"] < idx["pager"] or idx["bar"] < idx["container"]:
+            failures.append("bar is NOT the last wrapper child "
+                            "(pager=%d container=%d bar=%d) — the feed "
+                            "paints over the capsule"
+                            % (idx["pager"], idx["container"], idx["bar"]))
+
+    # --- home feed: header, tray, list (only when the tray is there) ---
+    tray = _res_node(nodes, "id/reels_tray_container")
+    if tray is not None:
+        tray_r = _rect(tray)
+        header = _res_node(nodes, "id/action_bar_LinearLayout") or \
+            _res_node(nodes, "id/main_feed_action_bar")
+        h_r = _rect(header) if header is not None else None
+        result["measured"]["header"] = list(h_r) if h_r else None
+        result["measured"]["tray_top"] = tray_r[1] if tray_r else None
+        if header is None:
+            # The phone bug exactly: tray present, header gone, feed
+            # pushed down under a black band.
+            failures.append("stories tray present but feed header missing")
+        elif h_r:
+            if not 40 <= h_r[1] <= 56:
+                failures.append("header top %d (expected ~48, "
+                                "just below the status bar)" % h_r[1])
+            if tray_r:
+                # One-sided on purpose: the tray sits AT the header
+                # bottom when settled, but for one sweep after a tab
+                # switch it is still at the pre-shift position (header
+                # bottom − 48 — the 1.19.1 probe's ui_step05 shows
+                # exactly that: tray 112, header bottom 160). What
+                # must never happen is the tray FAR BELOW the header
+                # (Hossein's broken feed: tray ~505) or above the
+                # header's top edge (header covering the stories).
+                if tray_r[1] > h_r[3] + 6:
+                    failures.append("stories tray top %d, header bottom "
+                                    "%d (tray must sit directly below "
+                                    "the header)" % (tray_r[1], h_r[3]))
+                elif tray_r[1] < h_r[1]:
+                    failures.append("stories tray top %d above header "
+                                    "top %d (header covers the stories)"
+                                    % (tray_r[1], h_r[1]))
+        lst = _res_node(nodes, "android:id/list")
+        if lst is not None:
+            l_r = _rect(lst)
+            result["measured"]["list_top"] = l_r[1] if l_r else None
+            if l_r and l_r[1] > 2:
+                failures.append("feed list top %d (expected 0 — feed "
+                                "pushed down)" % l_r[1])
+
+    result["result"] = "BROKEN" if failures else "OK"
+    if failures:
+        STATUS["geometry_broken"] = True
+        log("geometry %s: BROKEN — %s" % (label, "; ".join(failures)))
+    else:
+        log("geometry %s: OK" % label)
+    STATUS.setdefault("geometry_assertions", {})[label] = result
+    save_status()
+    return result
+
+
 def run_transition_test():
     """1.19 capsule-flash acceptance test: Home -> Reels -> Home
     with rapid screenshot bursts DURING each switch, checking every
@@ -1493,9 +1668,15 @@ def run_transition_test():
         # the delta during the transitions (not everything since
         # launch, which includes the 8-tap sequence).
         guard_before = 0
+        geo_before = 0
         try:
             out, _, _ = adb("logcat", "-d", timeout=90)
             guard_before = out.count("capsule re-applied in pre-draw")
+            # 1.19.2: the geometry guard's own firings (see
+            # TabBarHook.guardPreDraw) — the guard that catches a
+            # bar painted over or misplaced, not just a flat
+            # background.
+            geo_before = out.count("geometry guard:")
         except Exception:
             pass
         nodes = parse_dump(dump("step_trans0"))
@@ -1532,12 +1713,27 @@ def run_transition_test():
                     f"(spread {ev.get('spread')})")
         # Let the switch settle back on Home before the drag test.
         time.sleep(1.5)
+        # 1.19.2: settled geometry on Home after the switches — the
+        # burst shots catch a mid-switch flat frame, but the STUCK
+        # broken state (feed pushed down, capsule gone) only shows in
+        # a settled dump. A BROKEN here fails the run (see main()).
+        try:
+            settled = parse_dump(dump("step_trans_settled"))
+            if settled:
+                info["geometry"] = check_geometry(
+                    settled, "trans_settled_home")
+        except Exception as e:
+            log(f"transition test: settled geometry check failed ({e})")
         try:
             out, _, _ = adb("logcat", "-d", timeout=90)
             info["guard_firings"] = (
                 out.count("capsule re-applied in pre-draw") - guard_before)
+            info["geometry_guard_firings"] = (
+                out.count("geometry guard:") - geo_before)
             log(f"transition test: pre-draw guard fired "
-                f"{info['guard_firings']} time(s) during the switches")
+                f"{info['guard_firings']} time(s), geometry guard "
+                f"{info['geometry_guard_firings']} time(s) during the "
+                f"switches")
         except Exception as e:
             log(f"transition test: guard count failed ({e})")
         verdicts = [s["verdict"] for s in info["shots"]]
@@ -2011,10 +2207,23 @@ def main():
                 return finish("TIMEOUT",
                               "driver deadline reached during drag test "
                               "(after the swipe)")
+            # 1.19.2: a clean probe must mean the bug is gone, not
+            # untested — any failed geometry assertion fails the run
+            # instead of reporting LOGGED_IN_FEED.
+            if STATUS.get("geometry_broken"):
+                broken = {k: v for k, v in
+                          STATUS.get("geometry_assertions", {}).items()
+                          if v.get("result") == "BROKEN"}
+                return finish("GEOMETRY_BROKEN",
+                              "tab-switch geometry broken: " +
+                              json.dumps(broken)[:800])
             return finish("LOGGED_IN_FEED", "home feed + 8-tap sequence "
                           "captured (home/reels/direct/profile x2); "
                           f"transition test: {trans_result}; "
-                          f"drag test: {drag_result}")
+                          f"drag test: {drag_result}; "
+                          f"geometry: OK "
+                          f"({len(STATUS.get('geometry_assertions', {}))} "
+                          f"checks)")
         if state == "WRONG_PASSWORD":
             screenshot("shot_wrong_password")
             return finish("WRONG_PASSWORD",

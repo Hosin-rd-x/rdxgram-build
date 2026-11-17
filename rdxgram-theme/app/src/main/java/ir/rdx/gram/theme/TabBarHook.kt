@@ -79,6 +79,17 @@ import java.util.WeakHashMap
  * every draw, if the bar is styled and its background is not the
  * capsule, re-apply synchronously and cancel that draw — so no
  * frame ever shows the flat background. See watchActivity.
+ * 1.19.2: the tab-switch mess on Hossein's phone (feed pushed ~156dp
+ * down, capsule gone, sometimes STUCK). The 1.19 guard checked only
+ * the BACKGROUND — but Instagram re-adds/re-orders the wrapper's
+ * children on tab switches, so the bar can be painted OVER by the
+ * opaque feed while its background is still our capsule. The guard
+ * is now a GEOMETRY guard (margins, elevation, draw order — bar must
+ * be the last child of its parent), the fast path in apply() checks
+ * measured geometry too, apply() re-asserts draw order with
+ * bringToFront(), and the content panel is re-asserted on every
+ * layout pass (FullScreenHook.assertPanelGeometry). See
+ * work/rebuild-1.19.2/root-cause.md.
  */
 object TabBarHook {
 
@@ -182,8 +193,15 @@ object TabBarHook {
                     // background with a flat color, re-apply now instead of only
                     // refreshing the highlight — so the flat flicker lasts at
                     // most one layout pass, not until the next 400 ms sweep.
+                    // 1.19.2: the background is not the only thing
+                    // Instagram rebuilds on a tab switch — it re-adds
+                    // the wrapper's children (draw order) and resets
+                    // the bar's margins/elevation. A capsule painted
+                    // over is invisible even with the right background,
+                    // so the fast check here is background AND measured
+                    // geometry; anything wrong goes through apply().
                     val appliedCapsule = cached.getTag(TAG_CAPSULE_DRAWABLE) as? Drawable
-                    if (cached.background === appliedCapsule) {
+                    if (cached.background === appliedCapsule && barGeometryOk(cached)) {
                         refreshHighlight(cached, isNight(cached))
                     } else {
                         apply(cached)
@@ -192,6 +210,16 @@ object TabBarHook {
                     // bar (cheap no-op when present — re-syncs its
                     // position over the bar).
                     DragLensHook.attach(cached)
+                }
+                // 1.19.2: re-assert the content panel's geometry on
+                // this layout pass itself (see assertPanelGeometry):
+                // Instagram re-applies the window inset on tab
+                // switches, and waiting for the debounced sweep would
+                // let a broken frame paint. Cheap while the panel is
+                // cached (two WeakReference reads).
+                try {
+                    FullScreenHook.assertPanelGeometry(a)
+                } catch (ignored: Throwable) {
                 }
                 if (!Settings.isBarEnabled(a) && styledBars.isEmpty()) return@addOnGlobalLayoutListener
                 if (!pendingSweeps.add(decor)) return@addOnGlobalLayoutListener
@@ -235,15 +263,31 @@ object TabBarHook {
         val cached = cachedBar()
         if (cached != null && activityOf(cached) == a && styledBars.contains(cached)) {
             val appliedCapsule = cached.getTag(TAG_CAPSULE_DRAWABLE) as? Drawable
-            if (cached.background === appliedCapsule) return true
-            apply(cached)
-            if (!preDrawGuardLogged) {
-                preDrawGuardLogged = true
-                RdxLog.d("capsule re-applied in pre-draw (flat background caught before draw)")
-            } else {
-                RdxLog.d("capsule re-applied in pre-draw")
+            if (cached.background !== appliedCapsule) {
+                apply(cached)
+                if (!preDrawGuardLogged) {
+                    preDrawGuardLogged = true
+                    RdxLog.d("capsule re-applied in pre-draw (flat background caught before draw)")
+                } else {
+                    RdxLog.d("capsule re-applied in pre-draw")
+                }
+                return false
             }
-            return false
+            // 1.19.2: the background is not enough. Instagram re-adds
+            // the wrapper's children on tab switches (1.19.1 probe:
+            // ui_step_tab04after has layout_container_main before the
+            // pager), so the bar can be painted OVER by the opaque feed
+            // while its background is still our capsule — invisible
+            // with every old check passing. Verify MEASURED geometry
+            // too: margins, elevation, and draw order (last child
+            // wins). A failure re-applies synchronously and cancels
+            // this draw, so no broken frame ever paints.
+            if (!barGeometryOk(cached)) {
+                apply(cached)
+                RdxLog.d("geometry guard: bar geometry wrong, re-applied in pre-draw")
+                return false
+            }
+            return true
         }
         // No cached bar: Instagram may have rebuilt it on the page
         // switch (the old instance is detached). Look for the new one,
@@ -259,6 +303,41 @@ object TabBarHook {
         apply(bar)
         RdxLog.d("capsule re-applied in pre-draw (rebuilt bar found)")
         return false
+    }
+
+    /**
+     * 1.19.2: is the bar's MEASURED geometry what apply() set?
+     * Margins (against the CURRENT bottomInsetPx — a re-measured inset
+     * forces a re-apply), elevation 0, and the bar the last child of
+     * its parent (later child = painted on top; Instagram re-orders
+     * the wrapper's children on tab switches). Cheap: tag reads and
+     * int compares only, so the pre-draw guard can run it on every
+     * frame. Returns true when there is nothing to check (no saved
+     * state / no margin params) so the guard never blocks a draw on
+     * a bar apply() has not styled yet.
+     */
+    private fun barGeometryOk(bar: ViewGroup): Boolean {
+        try {
+            val saved = bar.getTag(TAG_SAVED_STATE) as? SavedState ?: return true
+            val lp = bar.layoutParams as? ViewGroup.MarginLayoutParams
+            if (lp != null) {
+                val wantLeft = saved.marginLeft + dp(bar, SIDE_MARGIN_DP)
+                val wantRight = saved.marginRight + dp(bar, SIDE_MARGIN_DP)
+                val wantBottom = saved.marginBottom + dp(bar, BOTTOM_MARGIN_DP) +
+                    FullScreenHook.bottomInsetPx
+                if (lp.leftMargin != wantLeft || lp.rightMargin != wantRight ||
+                    lp.bottomMargin != wantBottom
+                ) return false
+            }
+            if (bar.elevation != 0f) return false
+            val parent = bar.parent as? ViewGroup
+            if (parent != null && parent.childCount > 0 &&
+                parent.getChildAt(parent.childCount - 1) !== bar
+            ) return false
+            return true
+        } catch (ignored: Throwable) {
+            return true
+        }
     }
 
     private fun cachedBar(): ViewGroup? {
@@ -367,9 +446,19 @@ object TabBarHook {
             // signature alone does NOT prove the capsule is still there.
             // Re-apply when the background is not ours.
             val appliedCapsule = bar.getTag(TAG_CAPSULE_DRAWABLE) as? Drawable
+            // 1.19.2: the fast path used to trust (signature +
+            // background) alone. Instagram re-orders the wrapper's
+            // children and resets the bar's margins/elevation on tab
+            // switches, so a bar can pass those checks while being
+            // painted over or sitting in the wrong place — and the
+            // broken state then sticks, because nothing re-asserts
+            // it. The fast path now also requires the MEASURED
+            // geometry to match; anything wrong falls through to the
+            // full apply below, which re-sets margins, elevation and
+            // draw order.
             if (applied is Int && applied == signature && styledBars.contains(bar)
-                && bar.background === appliedCapsule) {
-                // Same theme, same size — only the selected tab may have moved.
+                && bar.background === appliedCapsule && barGeometryOk(bar)) {
+                // Same theme, same size, same geometry — only the selected tab may have moved.
                 refreshHighlight(bar, night)
                 DragLensHook.attach(bar)
                 return
@@ -444,6 +533,22 @@ object TabBarHook {
             }
 
             bar.elevation = 0f // iOS glass has no heavy shadow
+
+            // 1.19.2: draw order. Instagram re-adds the wrapper's
+            // children on tab switches (1.19.1 probe:
+            // ui_step_tab04after has layout_container_main before
+            // the pager); the bar is only visible while it is the
+            // LAST child of its parent — later child = painted on
+            // top. Elevation 0 alone does not save it. Re-asserted on
+            // every full apply; the guard and the fast path above
+            // check it, so a settled layout never calls this twice.
+            val parent = bar.parent as? ViewGroup
+            if (parent != null && parent.childCount > 0 &&
+                parent.getChildAt(parent.childCount - 1) !== bar
+            ) {
+                bar.bringToFront()
+                RdxLog.d("bar brought to front (draw order changed by Instagram)")
+            }
 
             hideDivider(bar, saved)
             warnIfComposeCovered(bar)

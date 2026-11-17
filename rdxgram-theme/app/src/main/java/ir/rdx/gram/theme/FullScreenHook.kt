@@ -11,6 +11,7 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import java.util.Collections
 import java.util.WeakHashMap
+import java.lang.ref.WeakReference
 
 /**
  * Full-screen feed for RdxGram 1.18 (on top of the proven-clean 1.17.1).
@@ -131,6 +132,29 @@ import java.util.WeakHashMap
  *    again, so a settled state is a no-op.
  *  - the top scrim is now a smoother 5-stop fade ending just below
  *    the status icons (statusBarHeight + 12dp), still very light.
+ * 1.19.2 (on top of 1.19.1) — the tab-switch mess on Hossein's phone:
+ *  - switching tabs messes up the full-screen state and the icons,
+ *    sometimes STUCK (feed pushed ~156dp down under a black band,
+ *    wordmark gone, capsule gone; Reels fine 10 min later). Root
+ *    cause: Instagram re-adds/re-orders the wrapper's children on tab
+ *    switches (1.19.1 probe dump ui_step_tab04after proves it), and
+ *    every geometry re-assert was gated on cached/one-shot state —
+ *    the pre-draw guard checked only the bar BACKGROUND, movePanelUp
+ *    never cleared the panel's OWN paddingTop, bottomInsetPx was
+ *    measured once and sticky, growViewToParent pinned a fixed height
+ *    from one transient measurement, convergeChrome ACCUMULATED
+ *    translationY (+= diff) unboundedly, and shiftFeedListTop trusted
+ *    a first-sight orig forever. This version re-asserts MEASURED
+ *    geometry everywhere: a geometry guard on pre-draw (bar margins /
+ *    elevation / draw order), a synchronous panel assert on every
+ *    layout pass, a two-sweep-stable bottom inset (growth waits for
+ *    it), a stable-parent-height escalation, absolute (never
+ *    accumulated) translationY with a clamp and a 5-sweep drop +
+ *    re-discover, a two-sweep-stable list-padding re-derivation, and
+ *    layout_container_main grown too. The driver now asserts the
+ *    settled geometry after every tab switch (GEOMETRY_BROKEN fails
+ *    the probe) — a clean probe must mean the bug is gone, not
+ *    untested. See work/rebuild-1.19.2/root-cause.md.
  *
  * Conservative by design: every step is null-checked and wrapped in
  * its own try/catch, so a missing view (or a view Instagram rebuilt
@@ -193,8 +217,41 @@ object FullScreenHook {
     // adds it to the bar's bottom margin so the capsule does not
     // slide down when the coordinator grows to the true bottom.
     // Written on the main thread (sweep); read on the same thread.
+    // 1.19.2: NO LONGER measured once — see bottomInsetCandidate
+    // below. A single transient reading during a tab-switch animation
+    // used to lock a wrong value into the bar's bottom margin for the
+    // life of the activity, with no way to correct it.
     @Volatile
     var bottomInsetPx: Int = 0
+
+    // 1.19.2: bottom-inset measurement state. A new value is accepted
+    // only from two IDENTICAL consecutive sweeps (see
+    // growCoordinator): a transient mis-measurement during a tab
+    // switch must never become the inset. coordinatorGrowAttempted
+    // marks coordinators already grown, so a later sweep never
+    // re-measures a grown coordinator (its height difference reads 0
+    // after growth — accepting that would clobber a good inset).
+    private var bottomInsetCandidate: Int = -1
+    private var bottomInsetCandidateSeen: Int = 0
+    private val coordinatorGrowAttempted: MutableSet<View> =
+        Collections.newSetFromMap(WeakHashMap<View, Boolean>())
+
+    // 1.19.2: cached panel/wrapper for assertPanelGeometry (called on
+    // every layout pass — a findByName walk per pass would cost more
+    // than the fix it protects). Weak references: a rebuilt panel
+    // drops out and is re-found on the next call.
+    private var cachedPanelRef: WeakReference<View>? = null
+    private var cachedWrapperRef: WeakReference<View>? = null
+
+    // 1.19.2: parent heights seen by the growViewToParent escalation
+    // (a fixed height is pinned only from a stable parent height —
+    // see growViewToParent), and feed-list padding values that match
+    // neither the saved orig nor the wanted value (see
+    // shiftFeedListTop).
+    private val escalationParentHeight: MutableMap<View, Int> =
+        Collections.synchronizedMap(WeakHashMap<View, Int>())
+    private val listTopOddValue: MutableMap<View, Int> =
+        Collections.synchronizedMap(WeakHashMap<View, Int>())
 
     // 1.19: chrome shifts (headers + the content below them).
     // ChromeShift.mode: 0 = top margin (preferred — composes with
@@ -212,7 +269,13 @@ object FullScreenHook {
         val targetTop: Int,
         var origLayoutTop: Int,
         val isHeader: Boolean,
-        var sweepsSeen: Int = 0
+        var sweepsSeen: Int = 0,
+        // 1.19.2: consecutive sweeps the view has NOT been on its
+        // target top (see convergeChrome). A view that will not
+        // converge is dropped after 5, so the next discovery
+        // re-derives its shift from the current layout instead of a
+        // stale snapshot taken mid-transition.
+        var missedSweeps: Int = 0
     )
 
     private val chromeShifts: MutableMap<View, ChromeShift> =
@@ -232,6 +295,88 @@ object FullScreenHook {
         }
         try {
             applyGeometry(a)
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /**
+     * 1.19.2: synchronously re-assert the content panel's geometry.
+     * Called from TabBarHook's layout listener on EVERY layout pass —
+     * Instagram re-applies the window inset on tab switches, and the
+     * debounced sweep (~400 ms later) would let a broken frame paint.
+     * Only writes when something actually differs, so a settled layout
+     * is a no-op. The panel/wrapper are cached (WeakReference) so the
+     * per-pass cost is two pointer reads; the findByName walk runs
+     * only when the cached view is gone (rebuilt by Instagram).
+     * Panel geometry only ever changes on a layout pass (margin /
+     * padding / behavior), never on a bare invalidate — so asserting
+     * here, before the draw that follows the layout, means no broken
+     * frame can paint. (The bar's BACKGROUND can change without a
+     * layout pass, which is why the bar has its own per-frame pre-draw
+     * guard in TabBarHook.)
+     */
+    fun assertPanelGeometry(a: Activity?) {
+        if (a == null) return
+        try {
+            val root = a.window?.decorView as? ViewGroup ?: return
+            val pkg = a.packageName
+            var panel = cachedPanelRef?.get()
+            if (panel == null || !panel.isAttachedToWindow) {
+                panel = findByName(root, a, "layout_container_main_panel", pkg)
+                cachedPanelRef = if (panel != null) WeakReference(panel) else null
+            }
+            if (panel != null) {
+                clearTopMargin(panel)
+                if (panel.paddingTop > 0) {
+                    savePadding(panel)
+                    panel.setPadding(
+                        panel.paddingLeft, 0, panel.paddingRight, panel.paddingBottom
+                    )
+                }
+                try {
+                    if (fitsCleared.add(panel)) panel.fitsSystemWindows = false
+                } catch (ignored: Throwable) {
+                }
+                // The inset can equally arrive as top padding on an
+                // ancestor (the probe log shows the coordinator
+                // ancestor re-applying paddingTop 48 on every tab
+                // switch): walk from the panel's parent up to the
+                // decor and clear any top padding found. Pointer hops
+                // + int reads only — cheap enough for every layout
+                // pass. (Same walk as movePanelUp step 3, which keeps
+                // running on the sweep as the backstop.)
+                try {
+                    val decor = a.window?.decorView
+                    var ancestor = panel.parent as? ViewGroup
+                    while (ancestor != null && ancestor !== decor) {
+                        try {
+                            if (ancestor.paddingTop > 0) {
+                                savePadding(ancestor)
+                                ancestor.setPadding(
+                                    ancestor.paddingLeft, 0,
+                                    ancestor.paddingRight, ancestor.paddingBottom
+                                )
+                            }
+                        } catch (ignored: Throwable) {
+                        }
+                        ancestor = ancestor.parent as? ViewGroup
+                    }
+                } catch (ignored: Throwable) {
+                }
+            }
+            var wrapper = cachedWrapperRef?.get()
+            if (wrapper == null || !wrapper.isAttachedToWindow) {
+                wrapper = findByName(root, a, "layout_container_main_wrapper", pkg)
+                cachedWrapperRef = if (wrapper != null) WeakReference(wrapper) else null
+            }
+            if (wrapper != null) {
+                clearTopMargin(wrapper)
+                clearTopPadding(wrapper)
+                try {
+                    if (fitsCleared.add(wrapper)) wrapper.fitsSystemWindows = false
+                } catch (ignored: Throwable) {
+                }
+            }
         } catch (ignored: Throwable) {
         }
     }
@@ -477,6 +622,22 @@ object FullScreenHook {
         val panel = findByName(root, a, "layout_container_main_panel", pkg) ?: return
         // 1. The panel's own top margin — the most likely seat.
         clearTopMargin(panel)
+        // 1.19.2 (step 1b): the panel's OWN top padding. An inset
+        // dispatch can land the padding on the panel itself; the
+        // ancestor walk below starts at the panel's PARENT and never
+        // touches it — and the old confirmation (panel.top == 0)
+        // passes while a large paddingTop holds the content low.
+        try {
+            if (panel.paddingTop > 0) {
+                savePadding(panel)
+                val before = panel.paddingTop
+                panel.setPadding(
+                    panel.paddingLeft, 0, panel.paddingRight, panel.paddingBottom
+                )
+                RdxLog.d("fullscreen panel paddingTop " + before + " -> 0")
+            }
+        } catch (ignored: Throwable) {
+        }
         // 2. A CoordinatorLayout Behavior seats the child in onLayoutChild
         //    and ignores the margin; remove it once, reflectively (no
         //    compile-time dependency on coordinatorlayout).
@@ -521,11 +682,14 @@ object FullScreenHook {
             }
         } catch (ignored: Throwable) {
         }
-        // 5. Confirmation, logged once: the panel's layout top is 0 only
-        //    after a layout pass has run with the margin gone.
+        // 5. Confirmation, logged once: the panel's layout top is 0
+        // AND its top padding is 0. The old check (top == 0 alone)
+        // passes while a paddingTop holds the content low (1.19.2) —
+        // the content position is the thing that matters. (The exact
+        // log string is a probe marker — kept.)
         try {
-            if (panel.top == 0 && panelTopConfirmed.add(panel)) {
-                RdxLog.d("fullscreen panel top=0 confirmed")
+            if (panel.top == 0 && panel.paddingTop == 0 && panelTopConfirmed.add(panel)) {
+                RdxLog.d("fullscreen panel top=0 confirmed (paddingTop 0)")
             }
         } catch (ignored: Throwable) {
         }
@@ -572,6 +736,18 @@ object FullScreenHook {
             }
         } catch (ignored: Throwable) {
         }
+        // 1.19.2: the inner container (layout_container_main) is the
+        // link the 1184 cap lives on — the 1.19.1 probe dumps show it
+        // at [0,0][720,1184] while the pager is already 1280. Grow it
+        // too, into its own parent (the wrapper).
+        try {
+            val container = findByName(root, a, "layout_container_main", pkg)
+            val cParent = container?.parent as? ViewGroup
+            if (container != null && cParent != null) {
+                growViewToParent(container, cParent)
+            }
+        } catch (ignored: Throwable) {
+        }
         attachPagerListener(pager)
         // Confirmation, logged once.
         try {
@@ -601,12 +777,51 @@ object FullScreenHook {
             root, a, "layout_container_center_right_coordinator_layout", pkg
         ) ?: return
         val parent = coordinator.parent as? ViewGroup ?: return
+        // 1.19.2: the bottom inset is measured from two IDENTICAL
+        // consecutive sweeps before the coordinator is grown — and the
+        // growth WAITS for that stable reading. The old code measured
+        // once (sticky) and grew in the same sweep: a transient
+        // mis-measurement during a tab-switch animation locked a wrong
+        // value into the bar's bottom margin for the life of the
+        // activity, and after growth the difference reads 0, so the
+        // value could never be corrected. A sane reading is 0..200 px.
+        // The one-sweep growth delay is invisible (the coordinator is
+        // still 1184 tall until then — the startup state anyway).
+        // (The exact "measured" log string is a probe marker — kept.)
         try {
-            if (bottomInsetPx == 0 && parent.height > coordinator.height &&
-                coordinator.height > 0
-            ) {
-                bottomInsetPx = parent.height - coordinator.height
-                RdxLog.d("fullscreen bottom inset measured: " + bottomInsetPx + "px")
+            if (!coordinatorGrowAttempted.contains(coordinator)) {
+                // Equal heights mean a zero inset; only a coordinator
+                // taller than its parent (or not laid out yet) cannot
+                // be measured.
+                val measured = if (coordinator.height > 0 &&
+                    parent.height >= coordinator.height
+                ) parent.height - coordinator.height else -1
+                if (measured in 0..200) {
+                    if (measured == bottomInsetPx && bottomInsetPx != 0) {
+                        // Already known from an earlier activity in
+                        // this process: grow now.
+                        coordinatorGrowAttempted.add(coordinator)
+                    } else if (measured == bottomInsetCandidate) {
+                        bottomInsetCandidateSeen++
+                        if (bottomInsetCandidateSeen >= 2) {
+                            bottomInsetPx = measured
+                            bottomInsetCandidate = -1
+                            bottomInsetCandidateSeen = 0
+                            coordinatorGrowAttempted.add(coordinator)
+                            RdxLog.d(
+                                "fullscreen bottom inset measured: " +
+                                    bottomInsetPx + "px"
+                            )
+                        }
+                    } else {
+                        bottomInsetCandidate = measured
+                        bottomInsetCandidateSeen = 1
+                    }
+                } else {
+                    // Cannot measure: grow without an inset rather
+                    // than blocking the layout.
+                    coordinatorGrowAttempted.add(coordinator)
+                }
             }
         } catch (ignored: Throwable) {
         }
@@ -614,7 +829,13 @@ object FullScreenHook {
             if (fitsCleared.add(coordinator)) coordinator.fitsSystemWindows = false
         } catch (ignored: Throwable) {
         }
-        growViewToParent(coordinator, parent)
+        // Growth waits for the settled inset: growing in the same
+        // sweep as the first measurement would make the second
+        // reading 0 (difference gone), so the real inset could never
+        // be confirmed.
+        if (coordinatorGrowAttempted.contains(coordinator)) {
+            growViewToParent(coordinator, parent)
+        }
     }
 
     /**
@@ -726,12 +947,39 @@ object FullScreenHook {
     private fun convergeChrome(v: View, state: ChromeShift) {
         try {
             state.sweepsSeen++
+            // 1.19.2: the effective top — layout top for the margin
+            // mode (Instagram's own hide-on-scroll translationY must
+            // not be mistaken for a margin that did not work), window
+            // top for the translation mode (translationY IS the
+            // mechanism there).
+            val effectiveTop = if (state.mode == 0) {
+                (windowTop(v) - v.translationY).toInt()
+            } else {
+                windowTop(v)
+            }
+            if (Math.abs(effectiveTop - state.targetTop) <= 1) {
+                state.missedSweeps = 0
+                return
+            }
+            // 1.19.2: a view that will not converge is dropped after
+            // 5 sweeps, so the next discovery re-derives origMargin /
+            // origTop from the view's CURRENT layout instead of a stale
+            // snapshot taken mid-transition. Without this, a wrong
+            // shift is re-asserted forever.
+            state.missedSweeps++
+            if (state.missedSweeps > 5) {
+                chromeShifts.remove(v)
+                RdxLog.d(
+                    "chrome " + describe(v) +
+                        " not converging after 5 sweeps; dropping shift (will re-discover)"
+                )
+                return
+            }
             if (state.mode == 0) {
                 // Layout top, not window top: Instagram's own
                 // translationY (hide-on-scroll) must not be mistaken
                 // for a margin that did not work.
-                val layoutTop = (windowTop(v) - v.translationY).toInt()
-                if (Math.abs(layoutTop - state.targetTop) <= 1) return
+                val layoutTop = effectiveTop
                 if (state.sweepsSeen >= 2) {
                     // One full layout cycle has run with the margin
                     // set and the view still has not moved: this
@@ -763,10 +1011,26 @@ object FullScreenHook {
                     }
                 }
             } else {
-                val top = windowTop(v)
-                val diff = state.targetTop - top
-                if (Math.abs(diff) > 1) {
-                    v.translationY = v.translationY + diff.toFloat()
+                // 1.19.2: SET translationY absolutely
+                // (targetTop - layoutTop), never accumulate (+= diff).
+                // The old accumulation grew unboundedly when the parent
+                // re-laid-out the view without moving it — each sweep
+                // added the same diff again, pushing the header/tray
+                // progressively down (the ~156dp push-down on Hossein's
+                // phone). Clamped to one screen height: a chrome view
+                // never legitimately translates further than that.
+                val layoutTop = (windowTop(v) - v.translationY).toInt()
+                var want = (state.targetTop - layoutTop).toFloat()
+                val maxShift = v.resources.displayMetrics.heightPixels.toFloat()
+                if (want > maxShift) want = maxShift
+                if (want < -maxShift) want = -maxShift
+                if (v.translationY != want) {
+                    v.translationY = want
+                    RdxLog.d(
+                        "chrome " + describe(v) +
+                            " translationY set to " + want +
+                            " (targetTop " + state.targetTop + ")"
+                    )
                 }
             }
         } catch (ignored: Throwable) {
@@ -865,15 +1129,51 @@ object FullScreenHook {
     private fun shiftFeedListTop(a: Activity, root: ViewGroup, pkg: String, shift: Int) {
         try {
             val list = findByNameInPackage(root, a, "list", "android") ?: return
-            val orig = savedListTopPadding[list] ?: list.paddingTop.also {
-                savedListTopPadding[list] = it
-            }
-            val want = orig + shift
-            if (list.paddingTop != want) {
+            val cur = list.paddingTop
+            val orig = savedListTopPadding[list]
+            if (orig == null) {
+                savedListTopPadding[list] = cur
+                val want = cur + shift
                 list.setPadding(
                     list.paddingLeft, want, list.paddingRight, list.paddingBottom
                 )
-                RdxLog.d("chrome feed list paddingTop " + orig + " -> " + want)
+                RdxLog.d("chrome feed list paddingTop " + cur + " -> " + want)
+                return
+            }
+            val want = orig + shift
+            if (cur == want || cur == orig) {
+                // Legitimate: our value, or Instagram's own value (not
+                // yet shifted). Re-assert ours.
+                listTopOddValue.remove(list)
+                if (cur != want) {
+                    list.setPadding(
+                        list.paddingLeft, want, list.paddingRight, list.paddingBottom
+                    )
+                    RdxLog.d("chrome feed list paddingTop " + orig + " -> " + want)
+                }
+                return
+            }
+            // 1.19.2: NEITHER Instagram's value NOR ours — something
+            // else changed the padding (transition / rebuild). The old
+            // code trusted `orig` forever, so a first sight taken
+            // mid-transition locked a wrong want for the life of the
+            // list. Re-derive orig from the CURRENT value — but only
+            // when it is stable across two consecutive sweeps, so a
+            // transient mid-transition value never becomes the new orig.
+            val last = listTopOddValue[list]
+            if (last != null && last == cur) {
+                savedListTopPadding[list] = cur
+                listTopOddValue.remove(list)
+                val newWant = cur + shift
+                list.setPadding(
+                    list.paddingLeft, newWant, list.paddingRight, list.paddingBottom
+                )
+                RdxLog.d(
+                    "chrome feed list paddingTop re-derived: orig " + orig +
+                        " -> " + cur + " (want " + newWant + ")"
+                )
+            } else {
+                listTopOddValue[list] = cur
             }
         } catch (ignored: Throwable) {
         }
@@ -961,6 +1261,12 @@ object FullScreenHook {
         try {
             val lp = v.layoutParams ?: return
             val parentH = parent.height
+            // 1.19.2: the view measures full again — drop any stored
+            // parent height so a later shrink re-arms the stability
+            // wait instead of escalating from a stale reading.
+            if (v.height > 0 && parentH > 0 && v.height >= parentH) {
+                escalationParentHeight.remove(v)
+            }
             var changed = false
             if (lp is ViewGroup.MarginLayoutParams && lp.bottomMargin > 0) {
                 saveMargins(v, lp)
@@ -982,13 +1288,32 @@ object FullScreenHook {
                 // MATCH_PARENT is set yet the view still measures short
                 // after a layout pass — escalate to an explicit fixed
                 // height equal to the parent's measured height.
-                if (!savedHeights.containsKey(v)) savedHeights[v] = lp.height
-                lp.height = parentH
-                changed = true
-                RdxLog.d(
-                    "fullscreen " + describe(v) + " height escalated to fixed " +
-                        parentH + "px (measured " + v.height + " / parent " + parentH + ")"
-                )
+                // 1.19.2: only from a STABLE parent height. During a
+                // tab switch the parent's measured height is transient
+                // (probe log: the pager oscillating 1136/1232/1280);
+                // pinning a fixed height from one transient reading
+                // sticks a wrong size. Wait one sweep for the same
+                // parent height twice; otherwise stay MATCH_PARENT.
+                // (The exact "escalated" log string is a probe marker
+                // — kept.)
+                val lastH = escalationParentHeight[v]
+                if (lastH != null && lastH == parentH) {
+                    escalationParentHeight.remove(v)
+                    if (!savedHeights.containsKey(v)) savedHeights[v] = lp.height
+                    lp.height = parentH
+                    changed = true
+                    RdxLog.d(
+                        "fullscreen " + describe(v) + " height escalated to fixed " +
+                            parentH + "px (measured " + v.height + " / parent " + parentH + ")"
+                    )
+                } else {
+                    escalationParentHeight[v] = parentH
+                    RdxLog.d(
+                        "fullscreen " + describe(v) + " height short (" +
+                            v.height + " / parent " + parentH +
+                            ") — waiting one sweep for a stable parent height"
+                    )
+                }
             } else if (lp.height == parentH && parentH > 0 &&
                 v.height > 0 && parentH > v.height &&
                 escalationCapped.add(v)

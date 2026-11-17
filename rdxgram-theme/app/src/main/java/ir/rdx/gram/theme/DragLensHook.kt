@@ -93,7 +93,10 @@ import kotlin.math.min
  */
 object DragLensHook {
 
-    private const val TAG_DRAG_OVERLAY = 0x7e1e0312
+    // 1.19.2: was 0x7e1e0312 — the same value as FullScreenHook's
+    // TAG_BLACK_BG. Different views, so no live collision, but a
+    // landmine: two tags must never share a key.
+    private const val TAG_DRAG_OVERLAY = 0x7e1e0313
 
     // The overlay lives on the window decor, NOT inside the bar (1.17 —
     // see the class doc). Exactly one overlay is owned at a time: a
@@ -124,6 +127,15 @@ object DragLensHook {
             val existing = attachedOverlay
             if (existing != null && attachedBarRef?.get() === bar && existing.parent != null) {
                 positionOverlay(existing, bar)
+                // 1.19.2: draw order — Instagram can re-add decor
+                // children on a tab switch; the overlay must stay the
+                // topmost decor child or it stops receiving touches.
+                val parent = existing.parent as? ViewGroup
+                if (parent != null && parent.childCount > 0 &&
+                    parent.getChildAt(parent.childCount - 1) !== existing
+                ) {
+                    existing.bringToFront()
+                }
                 return
             }
             // Different bar (Instagram rebuilt it), or the overlay was
