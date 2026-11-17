@@ -236,9 +236,21 @@ NOTIF_SWIPE_MS = 300       # recovery swipe duration (scroll, not a tap)
 # video ENDED — so the single swipe never tested its own
 # hypothesis. A ~460 px tall top video post needs ~700 px of
 # cumulative scroll (two swipes at ~430 px each) to clear it.
-NOTIF_SWIPE_MAX = 3        # max up-swipes in the post-NOTIF recovery
+#
+# Fix #11 (1.19.5 probe #2): the 700 px TARGET IS NOT A STOP
+# CONDITION any more. Probe #2 scrolled ~850 px (2 swipes,
+# ~400 + ~450 px) and dumps STILL failed — the new viewport held
+# ANOTHER playing video (a 5:20 video below the first one). The
+# feed is video-dense; the target only proves the TOP video left,
+# not that the viewport is video-free. The loop now keeps swiping
+# while dumps fail, up to NOTIF_SWIPE_MAX swipes (~2,600 px,
+# ~5-6 posts — a photo post is likely to appear), and only then
+# falls to pixel evidence. Passing 700 px is still logged (the
+# measurement keeps its meaning) but never stops the loop.
+NOTIF_SWIPE_MAX = 6        # max up-swipes in the post-NOTIF recovery
 NOTIF_SWIPE_TARGET_PX = 700  # cumulative scroll that clears the top
-                             # video post, with margin (logical px)
+                             # video post, with margin (logical px);
+                             # a LOG MARKER since fix #11, not a stop
 NOTIF_SCROLL_STEP_PX = 50  # estimator candidate step (logical px)
 NOTIF_SCROLL_MAX_PX = 1000  # estimator candidate ceiling (logical px)
 NOTIF_SCROLL_MIN_SAMPLES = 2000  # a candidate shift needs this many
@@ -1489,7 +1501,20 @@ def detect_drag_switch_from_shot(path):
     too (light capsule, dark top). The Profile screen reads as
     'home' (light capsule + light top); the swipe path Home->Reels
     cannot land on Profile, so that mislabel cannot affect the drag
-    verdict. Returns (label, evidence dict)."""
+    verdict. Fix #11: a SCROLLED home feed reads as 'reels' here —
+    the header has scrolled off (dark top) and the transparent
+    capsule shows the dark video behind it (dark bar). Probe #2's
+    shot_feed_pixels.png measures bar 122.3 / top 97.0 yet is the
+    home feed: the band y 690-900 is near-white feed chrome (action
+    rows / captions / next post header) on 5 of 6 sampled rows
+    (>= 248), while both real Reels-viewer shots from the 1.19.4
+    probe stay <= 187 there. So inside the dark-bar/dark-top
+    branch, a sustained near-white band (>= 4 of 6 rows > 235)
+    votes 'home' — a Reels viewer has no full-width white band.
+    Residual risk, recorded not hidden: a reel whose video is
+    near-white across that whole band would read 'home'; the drag
+    verdict never relies on this label alone (dumps + lens also
+    vote). Returns (label, evidence dict)."""
     png = _png_pixels(path)
     if png is None:
         return "unclear", {}
@@ -1504,6 +1529,18 @@ def detect_drag_switch_from_shot(path):
         return "unclear", {}
     ev = {"bar_mean": round(bar_mean, 1), "top_mean": round(top_mean, 1)}
     if bar_mean < 190 and top_mean < 200:
+        # Fix #11: scrolled-feed check — the white feed-chrome band
+        # (action rows / captions / next post header, y 690-900).
+        # Only inside this dark/dark branch, so the classic paths
+        # above are untouched.
+        xs = [(130, 195), (260, 330), (390, 460), (520, 585)]
+        mid_rows = [_row_mean_lum(png, y, xs)
+                    for y in (690, 720, 750, 780, 810, 850)]
+        white_rows = sum(1 for v in mid_rows
+                         if v is not None and v > 235.0)
+        ev["mid_white_rows"] = white_rows
+        if white_rows >= 4:
+            return "home", ev
         return "reels", ev
     if bar_mean > 200 and top_mean > 200:
         return "home", ev
@@ -1611,8 +1648,15 @@ def detect_flat_bar_frame(path):
         its own strong gradient could read 'capsule' (false negative)
         — the burst shots are eyeballed by the monitor as the
         backstop, and the pre-draw guard's logcat lines are the
-        primary evidence either way. Returns (verdict, evidence
-        dict)."""
+        primary evidence either way. Fix #11 (1.19.5 rim light):
+        the liquid-glass capsule's bright rim reads FAR BRIGHTER
+        than the feed above it — probe #2's shot_feed_pixels.png
+        measures ratio 2.74 (edge 220.1 vs above 80.2). A flat
+        repaint can only read the feed itself (ratio ~1.00), so a
+        ratio > 1.15 is rim-light evidence for the capsule, NOT a
+        flat frame; the old rule lumped it with 'flat' (>= 0.97)
+        and misread the new rim. The white-repaint band is now
+        0.97-1.15. Returns (verdict, evidence dict)."""
     png = _png_pixels(path)
     if png is None:
         return "unclear", {}
@@ -1641,9 +1685,9 @@ def detect_flat_bar_frame(path):
             ev["stroke_ratio"] = round(ratio, 2)
             ev["stroke_edge"] = round(edge, 1)
             ev["stroke_above"] = round(above, 1)
-            if 0.70 <= ratio <= 0.93:
+            if 0.70 <= ratio <= 0.93 or ratio > 1.15:
                 stroke = "capsule"
-            elif ratio >= 0.97 or ratio <= 0.30:
+            elif 0.97 <= ratio <= 1.15 or ratio <= 0.30:
                 stroke = "flat"
             ev["stroke"] = stroke
     if spread >= 15.0:
@@ -2499,17 +2543,21 @@ def post_notif_recovery():
       3. restart uiautomator (best-effort: a timed-out dump can
          leave a lingering process holding the UiAutomation
          connection) and retry one dump;
-      4. if that still fails, swipe UP repeatedly (fix #10) — after
-         EACH swipe take a screenshot, estimate how far the feed
-         actually scrolled with _shot_scroll_px(), restart
-         uiautomator and retry one dump. Stop early when the
-         cumulative scroll reaches NOTIF_SWIPE_TARGET_PX (the top
-         video is verifiably off-screen) or after NOTIF_SWIPE_MAX
-         swipes. Probe #3 proved one swipe is not enough: it moved
-         the feed only ~430 px and the video stayed fully in view.
-         An undecodable screenshot means the scroll is unknown, so
-         the loop keeps swiping (the old fix #9 behaviour) instead
-         of trusting a guess;
+      4. if that still fails, swipe UP repeatedly (fix #10, loop
+         extended by fix #11) — after EACH swipe take a screenshot,
+         estimate how far the feed actually scrolled with
+         _shot_scroll_px(), restart uiautomator and retry one dump.
+         Keep swiping while dumps fail, up to NOTIF_SWIPE_MAX
+         swipes: fix #11 proved the old 700 px stop was wrong —
+         probe #2 scrolled ~850 px and the new viewport held
+         ANOTHER playing video, so the target only proves the top
+         video left, not that the viewport is video-free. Passing
+         700 px is logged but never stops the loop. Probe #3 proved
+         one swipe is not enough: it moved the feed only ~430 px
+         and the video stayed fully in view. An undecodable
+         screenshot means the scroll is unknown, so the loop keeps
+         swiping (the old fix #9 behaviour) instead of trusting a
+         guess;
       5. if dumps still fail, take a post-swipe screenshot and
          record pixel evidence (see record_pixel_fallback) — the
          run stays DUMP_STUCK, but with evidence instead of only
@@ -2577,11 +2625,16 @@ def post_notif_recovery():
                     f"{attempt} swipe(s) (~{scrolled}px scrolled)")
                 return nodes
             if scrolled >= NOTIF_SWIPE_TARGET_PX:
+                # Fix #11: passing the target is a LOG MARKER, not
+                # a stop — probe #2 scrolled ~850 px and the new
+                # viewport held ANOTHER playing video, so the top
+                # video leaving does not mean the viewport is
+                # video-free. Keep swiping to the cap.
                 log("post-NOTIF recovery: scrolled "
                     f"~{scrolled}px (>= {NOTIF_SWIPE_TARGET_PX}px "
                     "target) — the top video is off-screen, but "
-                    "dumps still fail; no more swipes")
-                break
+                    "dumps still fail; continuing to swipe for a "
+                    "video-free viewport")
         log("post-NOTIF recovery: dumps still failing after the "
             "swipes; recording pixel evidence from a fresh shot")
         if screenshot("shot_feed_pixels"):
