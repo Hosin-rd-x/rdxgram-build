@@ -544,7 +544,10 @@ object FullScreenHook {
      * them at y=0).
      */
     private fun insetTopChrome(a: Activity, root: ViewGroup, pkg: String) {
-        val panel = findByName(root, a, "layout_container_main_panel", pkg) ?: return
+        // The panel is a ViewGroup (a layout container); the safe
+        // cast keeps the compiler honest — findByName returns View.
+        val panel = findByName(root, a, "layout_container_main_panel", pkg) as? ViewGroup
+            ?: return
         val shift = statusBarHeight(a)
         if (shift <= 0) return
         val screenW = a.resources.displayMetrics.widthPixels
