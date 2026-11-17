@@ -9,6 +9,7 @@ import android.graphics.Color
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.InsetDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Handler
 import android.os.Looper
 import android.view.View
@@ -90,6 +91,12 @@ import java.util.WeakHashMap
  * bringToFront(), and the content panel is re-asserted on every
  * layout pass (FullScreenHook.assertPanelGeometry). See
  * work/rebuild-1.19.2/root-cause.md.
+ * 1.19.5: the capsule DRAWING becomes the apo.branding liquid-glass
+ * stack (see buildLiquidGlassCapsule) — concentric rim rings, two
+ * white inner-shadow highlights and a soft bottom shadow, centre
+ * almost fully transparent. Still no real backdrop blur (impossible
+ * from a view hook, proven in 1.13/1.16); geometry, identity checks,
+ * the guard and the drag overlay are untouched.
  */
 object TabBarHook {
 
@@ -115,6 +122,12 @@ object TabBarHook {
     private const val HIGHLIGHT_MIN_INSET_X_DP = 8
     private const val HIGHLIGHT_INSET_Y_DP = 6
     private const val HIGHLIGHT_WIDTH_DP = 54
+
+    // 1.19.5 liquid glass: the three concentric rim rings step inward
+    // 3dp at a time (see buildLiquidGlassCapsule).
+    private const val RING_INSET_1_DP = 3
+    private const val RING_INSET_2_DP = 6
+    private const val RING_INSET_3_DP = 9
 
     // View tags (module-local keys).
     private const val TAG_SAVED_STATE = 0x7e1e0301
@@ -616,7 +629,11 @@ object TabBarHook {
                 Math.max(MIN_RADIUS_DP, Math.round(height / 2f / density))
             )
             val radiusPx = dp(bar, radius)
-            val signature = (if (night) 0x10000 else 0) or radiusPx
+            // 1.19.5: the capsule is also a function of the bar height
+            // (highlight/shadow bands are height-relative), so the
+            // signature covers height too — a height change rebuilds
+            // the stack instead of wearing stale bands.
+            val signature = (if (night) 0x10000 else 0) or (radiusPx shl 8) or (height and 0xFF)
             val applied = bar.getTag(TAG_APPLIED_SIGNATURE)
             // The capsule we painted is remembered on the bar. Instagram's own
             // tab-bar controller (X/00YD.A0K -> A0P) replaces any background
@@ -657,32 +674,15 @@ object TabBarHook {
                 bar.setTag(TAG_SAVED_STATE, saved)
             }
 
-            // Capsule, liquid-glass style (1.13, kept in the 1.14 bisect):
-            // a vertical gradient — light at the top edge, deeper at the
-            // bottom — over a translucent fill, with a thin light border.
-            // The fill is deliberately more translucent than the old
-            // solid 60%/70% so the feed shows through the capsule itself,
-            // while everything behind and around it stays fully
-            // transparent (no blur anywhere near the capsule).
-            val capsule = GradientDrawable()
-            capsule.shape = GradientDrawable.RECTANGLE
-            capsule.cornerRadius = radiusPx.toFloat()
-            capsule.orientation = GradientDrawable.Orientation.TOP_BOTTOM
-            if (night) {
-                capsule.colors = intArrayOf(
-                    Color.argb(64, 255, 255, 255), // white 25%: top-edge light
-                    Color.argb(96, 0, 0, 0), // black ~38%
-                    Color.argb(115, 0, 0, 0) // black 45%: bottom depth
-                )
-                capsule.setStroke(dp(bar, 1), Color.argb(77, 255, 255, 255)) // white, 30%
-            } else {
-                capsule.colors = intArrayOf(
-                    Color.argb(153, 255, 255, 255), // white 60%: top-edge light
-                    Color.argb(115, 255, 255, 255), // white 45%
-                    Color.argb(128, 255, 255, 255) // white 50%: bottom depth
-                )
-                capsule.setStroke(dp(bar, 1), Color.argb(36, 0, 0, 0)) // black, 14%
-            }
+            // 1.19.5 liquid glass (apo.branding Figma recipe): the
+            // capsule is a STACK of concentric rounded-rect layers,
+            // not one blur — see buildLiquidGlassCapsule. The centre
+            // stays almost fully transparent (the feed shows through
+            // it); the glass feel comes from the rim rings, the two
+            // white inner-shadow highlights and the soft shadow below.
+            // No backdrop blur anywhere: a RenderEffect here would
+            // blur the bar's own icons, not the feed behind it.
+            val capsule = buildLiquidGlassCapsule(bar, height, radiusPx, night)
             bar.background = capsule
             bar.setTag(TAG_CAPSULE_DRAWABLE, capsule)
 
@@ -747,6 +747,146 @@ object TabBarHook {
             }
         } catch (ignored: Throwable) {
         }
+    }
+
+    /**
+     * 1.19.5 liquid glass — the capsule as a STACK of concentric
+     * rounded-rect layers, translated from the apo.branding Figma
+     * tutorial (post DKzT5WnNoZ1, 7 slides, Figma only). The tutorial's
+     * recipe, layer by layer, and the Android mapping:
+     *
+     *  Figma step 1 — base rect, fill white 1%, background blur 50.
+     *  True backdrop blur is IMPOSSIBLE here (a RenderEffect on the
+     *  bar blurs the bar's own icons, not the feed behind it — proven
+     *  in 1.13/1.16), so the base keeps only the lightest vertical
+     *  scrim: white 12% top / 4% centre / 14% bottom (day), white
+     *  18% / 6% / 16% (night). The centre stays see-through — the
+     *  old 60%/45% fill is exactly the "merely blurry" look Hossein
+     *  rejected. Its 1dp outline stroke is the OUTERMOST rim:
+     *  white 45% (day) / 55% (night).
+     *
+     *  Figma steps 2–3 — three copies, each 2–5% smaller, blur
+     *  weakening toward the centre (20/10, 15/5, 10/1 layer/
+     *  background blur). Mapped as three inset STROKE rings inside
+     *  the edge (3/6/9dp in, corner radius shrinking with the
+     *  inset so the corners stay concentric), alpha falling toward
+     *  the centre (30% / 18% / 10% day; 38% / 24% / 14% night) —
+     *  the same fall-off as the tutorial's weakening blur. No fill
+     *  on the rings, so they never frost the centre.
+     *
+     *  Figma step 4 — top layer, no background blur, TWO white
+     *  inner shadows: (X 3, Y −2, blur 7, white 50%) and (X −6,
+     *  Y 6, blur 17, white 80%). Mapped as two inner-shadow
+     *  gradients clipped to the capsule shape: a tight bright one
+     *  biased top-left (TL_BR, white 50% → 18% → transparent over
+     *  the top 22% of the height) and a softer one along the bottom
+     *  edge (BL_TR, white 80% → 30% → transparent over the bottom
+     *  30%). This rim light is the heart of the liquid-glass feel —
+     *  it is meant to be clearly visible, not a faint smudge.
+     *
+     *  Figma step 5 — bottom "Shadow" layer: black inner shadow
+     *  (X 0, Y 4, blur 64, spread 12, black 25%) + layer blur 74.
+     *  Mapped as a soft dark strip whose gradient peaks (black 25%)
+     *  just below the capsule's bottom edge and fades both ways
+     *  (transparent 16dp above it, transparent 12dp below it) —
+     *  an inner bottom darkening plus a soft drop shadow. The part
+     *  below the capsule only paints if no ancestor clips it; the
+     *  in-capsule darkening always renders.
+     *
+     *  No chromatic fringing (none in the tutorial). No shape, size,
+     *  position, margin, elevation or draw-order change — the stack
+     *  is ONE Drawable (LayerDrawable), so the TAG_CAPSULE_DRAWABLE
+     *  identity check, the pre-draw guard and restore() all work
+     *  exactly as before. Seven GradientDrawables, no bitmaps, no
+     *  blur passes: the per-frame cost is the same single background
+     *  draw, and the stack is rebuilt only in the full apply() path.
+     */
+    private fun buildLiquidGlassCapsule(
+        bar: View, height: Int, radiusPx: Int, night: Boolean
+    ): LayerDrawable {
+        // Base (Figma step 1): near-transparent fill + outermost rim.
+        val base = GradientDrawable()
+        base.shape = GradientDrawable.RECTANGLE
+        base.cornerRadius = radiusPx.toFloat()
+        base.orientation = GradientDrawable.Orientation.TOP_BOTTOM
+        if (night) {
+            base.colors = intArrayOf(
+                Color.argb(46, 255, 255, 255), // white 18%: top-edge light
+                Color.argb(15, 255, 255, 255), // white 6%: see-through centre
+                Color.argb(41, 255, 255, 255) // white 16%: bottom depth
+            )
+            base.setStroke(dp(bar, 1), Color.argb(140, 255, 255, 255)) // white 55%
+        } else {
+            base.colors = intArrayOf(
+                Color.argb(31, 255, 255, 255), // white 12%: top-edge light
+                Color.argb(10, 255, 255, 255), // white 4%: see-through centre
+                Color.argb(36, 255, 255, 255) // white 14%: bottom depth
+            )
+            base.setStroke(dp(bar, 1), Color.argb(115, 255, 255, 255)) // white 45%
+        }
+
+        // Figma steps 2–3: three concentric rim rings, alpha falling
+        // toward the centre like the tutorial's weakening blur.
+        fun ring(insetDp: Int, alpha: Int): GradientDrawable {
+            val d = GradientDrawable()
+            d.shape = GradientDrawable.RECTANGLE
+            d.cornerRadius = Math.max(0, radiusPx - dp(bar, insetDp)).toFloat()
+            d.setColor(Color.TRANSPARENT)
+            d.setStroke(dp(bar, 1), Color.argb(alpha, 255, 255, 255))
+            return d
+        }
+        val ring1 = ring(RING_INSET_1_DP, if (night) 97 else 77) // white 38% / 30%
+        val ring2 = ring(RING_INSET_2_DP, if (night) 61 else 46) // white 24% / 18%
+        val ring3 = ring(RING_INSET_3_DP, if (night) 36 else 26) // white 14% / 10%
+
+        // Figma step 4: two white inner shadows — the rim light.
+        // Tight bright one, biased top-left, over the top 22%.
+        val highlightTop = GradientDrawable()
+        highlightTop.shape = GradientDrawable.RECTANGLE
+        highlightTop.cornerRadius = radiusPx.toFloat()
+        highlightTop.orientation = GradientDrawable.Orientation.TL_BR
+        highlightTop.colors = intArrayOf(
+            Color.argb(128, 255, 255, 255), // white 50%
+            Color.argb(46, 255, 255, 255), // white 18%
+            Color.argb(0, 255, 255, 255) // transparent
+        )
+        // Softer one along the bottom edge, over the bottom 30%.
+        val highlightBottom = GradientDrawable()
+        highlightBottom.shape = GradientDrawable.RECTANGLE
+        highlightBottom.cornerRadius = radiusPx.toFloat()
+        highlightBottom.orientation = GradientDrawable.Orientation.BL_TR
+        highlightBottom.colors = intArrayOf(
+            Color.argb(204, 255, 255, 255), // white 80%
+            Color.argb(77, 255, 255, 255), // white 30%
+            Color.argb(0, 255, 255, 255) // transparent
+        )
+
+        // Figma step 5: soft dark shadow, peaking at the bottom edge.
+        val shadow = GradientDrawable()
+        shadow.shape = GradientDrawable.RECTANGLE
+        shadow.cornerRadius = radiusPx.toFloat()
+        shadow.orientation = GradientDrawable.Orientation.TOP_BOTTOM
+        shadow.colors = intArrayOf(
+            Color.argb(0, 0, 0, 0), // transparent (16dp above the edge)
+            Color.argb(31, 0, 0, 0), // black 12%
+            Color.argb(64, 0, 0, 0), // black 25%: just below the bottom edge
+            Color.argb(0, 0, 0, 0) // transparent (12dp below the edge)
+        )
+
+        val capsule = LayerDrawable(
+            arrayOf<Drawable>(
+                shadow, base, ring1, ring2, ring3, highlightTop, highlightBottom
+            )
+        )
+        // Shadow strip: from 16dp above the bottom edge to 12dp below
+        // it (negative bottom inset = drawn outside the bar bounds).
+        val shadowTop = Math.max(0, height - dp(bar, 16))
+        capsule.setLayerInset(0, dp(bar, 6), shadowTop, dp(bar, 6), -dp(bar, 12))
+        // Top highlight: top 22% of the height.
+        capsule.setLayerInset(5, 0, 0, 0, height - height * 22 / 100)
+        // Bottom highlight: bottom 30% of the height.
+        capsule.setLayerInset(6, 0, height - height * 30 / 100, 0, 0)
+        return capsule
     }
 
     /**
