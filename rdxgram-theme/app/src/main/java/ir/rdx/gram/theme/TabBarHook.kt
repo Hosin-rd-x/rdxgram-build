@@ -172,6 +172,25 @@ object TabBarHook {
     private var lastBarSearchMs: Long = 0
     private var preDrawGuardLogged: Boolean = false
 
+    // 1.19.3: the bar-bottom clamp (see wantedBottomMargin) logs once
+    // per process — the clamp only fires when the inset is wrong, and
+    // a settled layout never re-logs it.
+    private var clampLogged: Boolean = false
+
+    // 1.19.3 round 2: reusable scratch for getLocationInWindow in
+    // wantedBottomMargin (main thread only — the guard and apply()
+    // both run there). Avoids an allocation on the per-frame
+    // pre-draw path.
+    private val locScratch = IntArray(2)
+
+    // 1.19.3 round 2 (Opus §3): the guard must not cancel the draw
+    // forever while the parent is still settling — at most one
+    // cancel in a row, then the next frame draws and the
+    // requestLayout() the fix triggered does its work. Alternating
+    // cancel/draw means the screen can never stay blank; the flag
+    // re-arms as soon as a pre-draw passes clean.
+    private var guardCancelArmed: Boolean = true
+
     /** Arm the hook for this activity. Called on every resume. */
     fun watchActivity(a: Activity?) {
         if (a == null) return
@@ -257,6 +276,10 @@ object TabBarHook {
     /**
      * 1.19 pre-draw guard. Returns true to let the draw proceed,
      * false to cancel it (the draw is re-run after the fix).
+     * 1.19.3 round 2: a cancel is armed at most once in a row (see
+     * cancelDrawOnce) — if the parent is still settling and the
+     * geometry is STILL wrong on the very next pre-draw, the frame
+     * draws anyway instead of blanking the screen forever.
      */
     private fun guardPreDraw(a: Activity, decor: View): Boolean {
         if (!Settings.isBarEnabled(a)) return true
@@ -271,7 +294,7 @@ object TabBarHook {
                 } else {
                     RdxLog.d("capsule re-applied in pre-draw")
                 }
-                return false
+                return cancelDrawOnce()
             }
             // 1.19.2: the background is not enough. Instagram re-adds
             // the wrapper's children on tab switches (1.19.1 probe:
@@ -285,8 +308,9 @@ object TabBarHook {
             if (!barGeometryOk(cached)) {
                 apply(cached)
                 RdxLog.d("geometry guard: bar geometry wrong, re-applied in pre-draw")
-                return false
+                return cancelDrawOnce()
             }
+            guardCancelArmed = true
             return true
         }
         // No cached bar: Instagram may have rebuilt it on the page
@@ -302,7 +326,117 @@ object TabBarHook {
         cachedBarRef = WeakReference(bar)
         apply(bar)
         RdxLog.d("capsule re-applied in pre-draw (rebuilt bar found)")
+        return cancelDrawOnce()
+    }
+
+    /**
+     * 1.19.3 round 2: cancel at most one draw in a row. The first
+     * cancel applies the fix, which requests a layout; if the very
+     * next pre-draw still finds broken geometry, the parent is
+     * fighting us (or still settling) and blanking the screen
+     * forever is worse than one imperfect frame — let it draw. The
+     * flag re-arms as soon as a pre-draw passes clean (see
+     * guardPreDraw), so the next real break is caught again.
+     * No explicit requestLayout() is ever called from this callback
+     * — apply() only sets layout params, the standard mechanism.
+     */
+    private fun cancelDrawOnce(): Boolean {
+        if (!guardCancelArmed) {
+            guardCancelArmed = true
+            return true
+        }
+        guardCancelArmed = false
         return false
+    }
+
+    /**
+     * 1.19.3: the ONE place that computes the bar's wanted bottom
+     * margin — used by BOTH apply() (sets it) and barGeometryOk()
+     * (checks it). Single source of truth, so a margin this function
+     * produces always satisfies the guard: after one application the
+     * geometry is stable by construction, and no per-frame loop is
+     * possible (no streak breaker needed).
+     *
+     * The formula is the saved stock margin + 8dp + the CURRENT
+     * bottomInsetPx (a re-measured inset forces a re-apply). On top
+     * of that, a safety clamp: if FullScreenHook knows the system
+     * nav bar's top edge (navBarTopPx > 0) AND the bar is
+     * bottom-anchored (its measured bottom is parent.height -
+     * current lp.bottomMargin, ±2 px — otherwise the margin does
+     * not control the bottom and clamping it would fight a layout
+     * we do not understand), the bar's bottom must not pass the nav
+     * bar's top edge. If the formula margin would put it there, the
+     * margin is raised so the bar lands exactly at the nav-bar top
+     * instead of under it. With the inset fixed (96 px on the
+     * emulator) the clamp never fires — bottom 112 px lands the bar
+     * at 1168, 16 px above the nav bar; it only fires if the inset
+     * is wrong, and then it is the backstop that keeps the taps in
+     * the app instead of on SystemUI.
+     *
+     * IDEMPOTENCE (1.19.3 round 2 — Opus §3, verified by
+     * construction): the clamped value is parent.height − maxBottom,
+     * where maxBottom = navTop − parentWinTop — computed ONLY from
+     * the parent's geometry and the nav-bar top. The bar's current
+     * bottom appears solely in the ±2 px bottom-anchored guard, never
+     * in the value, so re-applying a clamped margin returns the same
+     * number on every frame: after clamping, bar.bottom ==
+     * parent.height − clamped == maxBottom, the guard still passes,
+     * and the formula margin is unchanged, so the clamp recomputes
+     * identically. The equality short-circuit lives in the callers
+     * (barGeometryOk returns true when lp.bottomMargin ==
+     * wantedBottomMargin; apply() only writes when a margin
+     * differs), so a settled layout never re-applies. Opus's
+     * suggested form (margin = max(base, parentBottom − navTop +
+     * base)) was NOT pasted: it double-counts the base (on the
+     * emulator: max(112, 1280 − 1184 + 112) = 208 → bar bottom
+     * 1072, 96 px too high). The correct safe form is
+     * max(base, parent.height − maxBottom), which is exactly what
+     * the clamp below computes.
+     */
+    private fun wantedBottomMargin(bar: ViewGroup, saved: SavedState): Int {
+        val bottom = saved.marginBottom + dp(bar, BOTTOM_MARGIN_DP) +
+            FullScreenHook.bottomInsetPx
+        try {
+            val navTop = FullScreenHook.navBarTopPx
+            if (navTop > 0) {
+                val lp = bar.layoutParams as? ViewGroup.MarginLayoutParams
+                val parent = bar.parent as? ViewGroup
+                if (lp != null && parent != null && parent.height > 0) {
+                    // Only when bottom-anchored: the margin controls
+                    // the bottom edge (bar.bottom is parent-relative).
+                    if (Math.abs(bar.bottom - (parent.height - lp.bottomMargin)) <= 2) {
+                        // The parent's WINDOW top — getLocationInWindow
+                        // is translationY-aware (the old manual walk
+                        // summing getTop() ignored the hide/show
+                        // animation IG runs on its bars, so the clamp
+                        // could fight it) and a single call, which
+                        // matters on the per-frame path. navBarTopPx
+                        // is window coords too (see
+                        // FullScreenHook.measureBottomInset), so the
+                        // two are directly comparable. On the
+                        // emulator: parent top 0, navTop 1184 →
+                        // maxBottom 1184, clamped 1280 − 1184 = 96 —
+                        // the same value the walk computed.
+                        parent.getLocationInWindow(locScratch)
+                        val parentWinTop = locScratch[1]
+                        val maxBottom = navTop - parentWinTop
+                        if (parent.height - bottom > maxBottom) {
+                            val clamped = parent.height - maxBottom
+                            if (!clampLogged) {
+                                clampLogged = true
+                                RdxLog.d(
+                                    "bar bottom clamped to nav bar top " +
+                                        "(margin " + bottom + " -> " + clamped + ")"
+                                )
+                            }
+                            return clamped
+                        }
+                    }
+                }
+            }
+        } catch (ignored: Throwable) {
+        }
+        return bottom
     }
 
     /**
@@ -323,8 +457,10 @@ object TabBarHook {
             if (lp != null) {
                 val wantLeft = saved.marginLeft + dp(bar, SIDE_MARGIN_DP)
                 val wantRight = saved.marginRight + dp(bar, SIDE_MARGIN_DP)
-                val wantBottom = saved.marginBottom + dp(bar, BOTTOM_MARGIN_DP) +
-                    FullScreenHook.bottomInsetPx
+                // 1.19.3: the wanted margin comes from the shared
+                // helper (same function apply() uses to set it), so a
+                // clamped margin satisfies this check.
+                val wantBottom = wantedBottomMargin(bar, saved)
                 if (lp.leftMargin != wantLeft || lp.rightMargin != wantRight ||
                     lp.bottomMargin != wantBottom
                 ) return false
@@ -522,8 +658,10 @@ object TabBarHook {
             if (lp is ViewGroup.MarginLayoutParams) {
                 val left = saved.marginLeft + dp(bar, SIDE_MARGIN_DP)
                 val right = saved.marginRight + dp(bar, SIDE_MARGIN_DP)
-                val bottom = saved.marginBottom + dp(bar, BOTTOM_MARGIN_DP) +
-                    FullScreenHook.bottomInsetPx
+                // 1.19.3: the wanted margin comes from the shared
+                // helper (same function barGeometryOk() checks), with
+                // the nav-bar clamp as a backstop.
+                val bottom = wantedBottomMargin(bar, saved)
                 if (lp.leftMargin != left || lp.rightMargin != right || lp.bottomMargin != bottom) {
                     lp.leftMargin = left
                     lp.rightMargin = right

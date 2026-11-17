@@ -4,9 +4,11 @@ import android.app.Activity
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
 import java.util.Collections
@@ -212,29 +214,121 @@ object FullScreenHook {
 
     // 1.19: the bottom inset the coordinator loses to the system nav
     // bar (parent height − coordinator height, 96 px on the 720x1280
-    // probe). Measured ONCE, before the coordinator is grown, and
-    // kept sticky: after growth the difference reads 0. TabBarHook
-    // adds it to the bar's bottom margin so the capsule does not
-    // slide down when the coordinator grows to the true bottom.
-    // Written on the main thread (sweep); read on the same thread.
-    // 1.19.2: NO LONGER measured once — see bottomInsetCandidate
-    // below. A single transient reading during a tab-switch animation
-    // used to lock a wrong value into the bar's bottom margin for the
-    // life of the activity, with no way to correct it.
+    // probe). TabBarHook adds it to the bar's bottom margin so the
+    // capsule does not slide down when the coordinator grows to the
+    // true bottom. Written on the main thread (sweep); read on the
+    // same thread.
+    // 1.19.3 measurement (see measureBottomInset): PRIMARY source is
+    // the decor's own android:id/navigationBarBackground view —
+    // untouched by our growth, present at exactly [0,1184][720,1280]
+    // on the emulator — inset = decor height − navBg top (window
+    // coords); its top edge is also published as navBarTopPx so
+    // TabBarHook can clamp the bar above it (backstop). FALLBACK is
+    // the coordinator/parent difference, only while the coordinator
+    // is laid out and NOT yet grown, and only while the inset is
+    // still unknown (the 1.19.1 retry gate).
+    // 1.19.3 round 2 (Opus review #1): the gesture handle has no
+    // navBg view at all, so the navBg path would conclude inset 0
+    // and put the bar on the handle — the gesture case is measured
+    // from the system's own WindowInsets instead (see
+    // windowInsetsBottomInset). A side nav bar (landscape) likewise
+    // contributes nothing to the BOTTOM inset (its width < height,
+    // top == 0 — the old displayHeight − top formula would have
+    // yielded the whole screen height as an inset).
+    // 1.19.2's failure, fixed here: the two-sweep candidate machinery
+    // (bottomInsetCandidate / coordinatorGrowAttempted, deleted below)
+    // gated ALL measurement on the first sweep, which runs PRE-layout
+    // (coordinator.height == 0) — so the unmeasurable branch marked
+    // the coordinator "attempted" and the inset stayed 0 forever,
+    // while the "already known" branch treated that 0 as a real
+    // measurement and grew the coordinator under it. The bar slid
+    // 96 px down ([32,1168][688,1264]) and its tab centres landed
+    // inside the system nav bar. A 0 that means "never measured"
+    // must never be confused with a 0 that means "gesture nav,
+    // genuinely no inset" — hence the separate bottomInsetKnown flag.
     @Volatile
     var bottomInsetPx: Int = 0
 
-    // 1.19.2: bottom-inset measurement state. A new value is accepted
-    // only from two IDENTICAL consecutive sweeps (see
-    // growCoordinator): a transient mis-measurement during a tab
-    // switch must never become the inset. coordinatorGrowAttempted
-    // marks coordinators already grown, so a later sweep never
-    // re-measures a grown coordinator (its height difference reads 0
-    // after growth — accepting that would clobber a good inset).
-    private var bottomInsetCandidate: Int = -1
-    private var bottomInsetCandidateSeen: Int = 0
-    private val coordinatorGrowAttempted: MutableSet<View> =
+    // Window Y of the top edge of navigationBarBackground when
+    // that view is present and laid out; 0 when there is no system
+    // nav bar (gesture nav) or it has not been laid out yet.
+    // Window coords (see measureBottomInset) — TabBarHook compares
+    // it against the parent's getLocationInWindow, same space.
+    // Published for TabBarHook's clamp backstop.
+    @Volatile
+    var navBarTopPx: Int = 0
+
+    // True once a measurement (from either source) has been accepted.
+    // Distinct from bottomInsetPx == 0, which is a legitimate value
+    // on gesture navigation.
+    private var bottomInsetKnown: Boolean = false
+
+    // True when the current bottomInsetPx came from the nav-bar
+    // background (ground truth): it may be re-asserted every sweep.
+    // A difference-sourced value is trusted only while the inset is
+    // still unknown — it must never overwrite a navBg-sourced one.
+    private var bottomInsetTrusted: Boolean = false
+
+    // Which source produced the current bottomInsetPx, for the log
+    // line the probe asserts ("navBg" / "windowInsets" /
+    // "fallback" / "gesture-0" / "side-nav"). "unknown" while the
+    // inset has never been measured.
+    private var bottomInsetSource: String = "unknown"
+
+    // Set when the navBg reading and the WindowInsets reading
+    // disagree (e.g. "navBg=96 windowInsets=0"); navBg wins (see
+    // measureBottomInset). Null when they agree or insets are
+    // unavailable. Reset on every measurement.
+    private var insetDisagreement: String? = null
+
+    // Consecutive sweeps where navigationBarBackground exists but is
+    // not laid out yet (height 0). Two in a row means it will never
+    // lay out — the device has no system nav bar (gesture nav) — so
+    // the inset is genuinely 0. Reset whenever a laid-out reading
+    // arrives. 1.19.3 round 2: counted ONLY when the view HAS been
+    // laid out (isLaidOut) with height 0 — a view that simply has
+    // not been laid out yet concludes nothing (slow layout).
+    private var navBgZeroSweeps: Int = 0
+
+    // Consecutive sweeps where the inset could not be measured at
+    // all. After 3, growCoordinator grows anyway (escape hatch) and
+    // logs a warning once — the TabBarHook clamp is the backstop.
+    // The escape hatch does NOT set bottomInsetKnown: a later navBg
+    // reading can still correct the inset.
+    private var insetUnknownSweeps: Int = 0
+    private var insetEscapeLogged: Boolean = false
+
+    // 1.19.3 round 2: the inset state belongs to ONE decor view.
+    // Rotation (or a second activity) brings a new decor; the
+    // object-level fields above would otherwise carry the old
+    // window's inset (e.g. 96 px portrait) into a landscape window
+    // whose bottom inset is 0. measureBottomInset resets all of
+    // them when the decor changes (see resetInsetState).
+    private var insetDecorRef: WeakReference<View>? = null
+
+    // Coordinators already grown. The coordinator/parent fallback
+    // is ONLY valid before growth — after growth the difference
+    // reads 0 by construction, and accepting that 0 as known is
+    // exactly the 1.19.2 state. Keyed by view identity (weak), so
+    // a rebuilt coordinator is measured fresh. This set gates the
+    // FALLBACK only, never the navBg primary (which re-measures
+    // every sweep).
+    private val fallbackBlocked: MutableSet<View> =
         Collections.newSetFromMap(WeakHashMap<View, Boolean>())
+
+    /** Reset all per-decor inset state for a new window. */
+    private fun resetInsetState(decor: View) {
+        insetDecorRef = WeakReference(decor)
+        bottomInsetPx = 0
+        navBarTopPx = 0
+        bottomInsetKnown = false
+        bottomInsetTrusted = false
+        bottomInsetSource = "unknown"
+        insetDisagreement = null
+        navBgZeroSweeps = 0
+        insetUnknownSweeps = 0
+        insetEscapeLogged = false
+    }
 
     // 1.19.2: cached panel/wrapper for assertPanelGeometry (called on
     // every layout pass — a findByName walk per pass would cost more
@@ -772,56 +866,54 @@ object FullScreenHook {
      * (sticky — after growth the difference reads 0) so TabBarHook
      * can hold the capsule where it is.
      */
+    /**
+     * Grow the coordinator to its parent so the feed chain reaches the
+     * true bottom — but ONLY once the bottom inset is known.
+     *
+     * 1.19.3 (fixes the 1.19.2 regression): the inset is measured from
+     * ground truth by measureBottomInset — the decor's own
+     * navigationBarBackground top (primary), or the coordinator/parent
+     * difference while the coordinator is laid out and NOT yet grown
+     * (fallback, the 1.19.1 retry gate). Growth waits for a known
+     * inset: growing first would make the difference read 0 and the
+     * bar would slide under the nav bar (1.19.2: bar [32,1168][688,1264],
+     * tab centres inside the system nav bar, every tap after the
+     * first hitting SystemUI). Escape hatch: if the inset stays
+     * unknown for 3 sweeps (a device where neither source works),
+     * grow anyway with a warning — the TabBarHook clamp is the
+     * backstop. (The exact "measured" log string is a probe marker —
+     * kept.)
+     */
     private fun growCoordinator(a: Activity, root: ViewGroup, pkg: String) {
         val coordinator = findByName(
             root, a, "layout_container_center_right_coordinator_layout", pkg
         ) ?: return
         val parent = coordinator.parent as? ViewGroup ?: return
-        // 1.19.2: the bottom inset is measured from two IDENTICAL
-        // consecutive sweeps before the coordinator is grown — and the
-        // growth WAITS for that stable reading. The old code measured
-        // once (sticky) and grew in the same sweep: a transient
-        // mis-measurement during a tab-switch animation locked a wrong
-        // value into the bar's bottom margin for the life of the
-        // activity, and after growth the difference reads 0, so the
-        // value could never be corrected. A sane reading is 0..200 px.
-        // The one-sweep growth delay is invisible (the coordinator is
-        // still 1184 tall until then — the startup state anyway).
-        // (The exact "measured" log string is a probe marker — kept.)
         try {
-            if (!coordinatorGrowAttempted.contains(coordinator)) {
-                // Equal heights mean a zero inset; only a coordinator
-                // taller than its parent (or not laid out yet) cannot
-                // be measured.
-                val measured = if (coordinator.height > 0 &&
-                    parent.height >= coordinator.height
-                ) parent.height - coordinator.height else -1
-                if (measured in 0..200) {
-                    if (measured == bottomInsetPx && bottomInsetPx != 0) {
-                        // Already known from an earlier activity in
-                        // this process: grow now.
-                        coordinatorGrowAttempted.add(coordinator)
-                    } else if (measured == bottomInsetCandidate) {
-                        bottomInsetCandidateSeen++
-                        if (bottomInsetCandidateSeen >= 2) {
-                            bottomInsetPx = measured
-                            bottomInsetCandidate = -1
-                            bottomInsetCandidateSeen = 0
-                            coordinatorGrowAttempted.add(coordinator)
+            val inset = measureBottomInset(a, coordinator, parent)
+            if (inset != null) {
+                val first = !bottomInsetKnown
+                if (bottomInsetTrusted || first) {
+                    if (first || inset != bottomInsetPx) {
+                        bottomInsetPx = inset
+                        bottomInsetKnown = true
+                        RdxLog.d(
+                            "fullscreen bottom inset measured: " +
+                                bottomInsetPx + "px (source=" +
+                                bottomInsetSource + ")"
+                        )
+                        val dis = insetDisagreement
+                        if (dis != null) {
                             RdxLog.d(
-                                "fullscreen bottom inset measured: " +
-                                    bottomInsetPx + "px"
+                                "fullscreen inset sources disagree: " +
+                                    dis + " — trusting navBg"
                             )
                         }
-                    } else {
-                        bottomInsetCandidate = measured
-                        bottomInsetCandidateSeen = 1
                     }
-                } else {
-                    // Cannot measure: grow without an inset rather
-                    // than blocking the layout.
-                    coordinatorGrowAttempted.add(coordinator)
                 }
+                insetUnknownSweeps = 0
+            } else {
+                insetUnknownSweeps++
             }
         } catch (ignored: Throwable) {
         }
@@ -829,12 +921,203 @@ object FullScreenHook {
             if (fitsCleared.add(coordinator)) coordinator.fitsSystemWindows = false
         } catch (ignored: Throwable) {
         }
-        // Growth waits for the settled inset: growing in the same
-        // sweep as the first measurement would make the second
-        // reading 0 (difference gone), so the real inset could never
-        // be confirmed.
-        if (coordinatorGrowAttempted.contains(coordinator)) {
+        // Growth waits for a known inset (see the doc above). The
+        // escape hatch keeps a broken decor lookup from blocking the
+        // layout forever.
+        if (bottomInsetKnown || insetUnknownSweeps >= 3) {
+            if (!bottomInsetKnown && !insetEscapeLogged) {
+                insetEscapeLogged = true
+                RdxLog.d(
+                    "fullscreen growing coordinator without a measured " +
+                        "inset (unknown after 3 sweeps)"
+                )
+            }
             growViewToParent(coordinator, parent)
+            // 1.19.3 round 2 (Opus #2): growth ends the fallback
+            // for this coordinator — its height difference reads 0
+            // from now on, and that 0 must never become the known
+            // inset. The navBg primary is unaffected (it re-measures
+            // every sweep) and can still correct the inset later;
+            // bottomInsetKnown stays false after the escape hatch.
+            fallbackBlocked.add(coordinator)
+        }
+    }
+
+    /**
+     * 1.19.3 round 2: the system's own bottom navigation inset,
+     * from WindowInsets. This is the ONLY source that sees the
+     * gesture handle (navBg is absent on gesture nav, so the navBg
+     * path would conclude 0 and put the bar on the handle).
+     * API 30+ uses WindowInsets.Type.navigationBars(); below that
+     * the deprecated systemWindowInsetBottom. Returns null when
+     * insets are not available yet (pre-layout) or the value is
+     * insane (> 200 px). Never throws.
+     */
+    private fun windowInsetsBottomInset(a: Activity): Int? {
+        return try {
+            val decor = a.window?.decorView ?: return null
+            val insets = decor.rootWindowInsets ?: return null
+            val bottom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+            } else {
+                @Suppress("DEPRECATION")
+                insets.systemWindowInsetBottom
+            }
+            if (bottom in 0..200) bottom else null
+        } catch (ignored: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * 1.19.3: measure the bottom inset (system navigation bar height)
+     * from ground truth. Returns the inset in px, or null when it
+     * cannot be known yet. Side effects: publishes navBarTopPx (the
+     * window Y of the nav-bar background's top edge; 0 when there is
+     * no system nav bar), sets bottomInsetTrusted (true when the
+     * current reading came from the nav-bar background or the
+     * system insets) and bottomInsetSource (which source produced
+     * it, for the log line the probe asserts).
+     *
+     * PRIMARY — the decor's android:id/navigationBarBackground view:
+     * it is a direct child of the decor, untouched by our growth, and
+     * present at exactly [0,1184][720,1280] in every emulator dump.
+     * inset = decor height − navBg top, both in WINDOW coords (see
+     * below). A reading outside 1..200 px is insane — return null
+     * (wait) rather than trusting it.
+     *   - view absent → gesture nav → inset from WindowInsets
+     *     (trusted); 0 only when insets are unavailable too.
+     *   - view present but height 0 → not laid out yet → null; a
+     *     zero-height streak of >= 2 sweeps WHILE LAID OUT means it
+     *     will never lay out (gesture nav) → WindowInsets / 0.
+     *   - view present, laid out, but width < height → SIDE nav bar
+     *     (landscape): the bottom inset is 0 (WindowInsets if it
+     *     has a value), re-measured every sweep.
+     * The inset is computed from WINDOW geometry, not
+     * displayMetrics.heightPixels: on some API levels / OEM ROMs the
+     * display metrics exclude the nav bar, which would compute 0
+     * and re-create 1.19.2; the decor's own height cannot lie about
+     * its own window. On the emulator both give 1280 − 1184 = 96
+     * (verified against the real 1.19.2 dumps).
+     * WindowInsets is the cross-check on the navBg path and the
+     * source on the gesture/side paths — but NOT the primary over a
+     * laid-out navBg: navBg is dump-verifiable ground truth, while
+     * the insets' behaviour on Redroid + this app's edge-to-edge
+     * flags is unverified until the probe runs, and a wrong trusted
+     * 0 from insets would re-create 1.19.2. A disagreement is
+     * logged where the value is accepted.
+     * FALLBACK — the coordinator/parent difference, only while the
+     * coordinator is laid out and NOT yet grown (parent.height >
+     * coordinator.height; after growth they are equal, so this can
+     * never return a post-growth 0). It never overwrites a
+     * navBg-sourced value — that decision is made by the caller via
+     * bottomInsetTrusted. A fallback 0 is rejected outright.
+     * If the decor lookup itself fails, the fallback is still tried:
+     * a missing decor must not block measurement.
+     */
+    private fun measureBottomInset(
+        a: Activity, coordinator: View, parent: ViewGroup
+    ): Int? {
+        // 1.19.3 round 2: the inset state belongs to one decor view
+        // (see resetInsetState) — a new decor re-measures from
+        // scratch instead of inheriting the old window's inset.
+        try {
+            val decor = a.window?.decorView
+            if (decor != null && decor !== insetDecorRef?.get()) {
+                resetInsetState(decor)
+            }
+        } catch (ignored: Throwable) {
+        }
+        insetDisagreement = null
+        // PRIMARY: the nav-bar background view (same lookup as
+        // blackenNavBarBackground below).
+        try {
+            val decor = a.window?.decorView as? ViewGroup
+            if (decor != null) {
+                val navBg = decor.findViewById<View>(
+                    android.R.id.navigationBarBackground
+                )
+                if (navBg != null) {
+                    if (navBg.height > 0) {
+                        navBgZeroSweeps = 0
+                        // Side nav bar (landscape): tall thin view,
+                        // top == 0. Contributes nothing to the
+                        // BOTTOM inset — 0, re-measured every sweep
+                        // (orientation can change at any time).
+                        if (navBg.width > 0 && navBg.width < navBg.height) {
+                            navBarTopPx = 0
+                            val wi = windowInsetsBottomInset(a)
+                            bottomInsetTrusted = true
+                            bottomInsetSource =
+                                if (wi != null) "windowInsets" else "side-nav"
+                            return wi ?: 0
+                        }
+                        val winLoc = IntArray(2)
+                        navBg.getLocationInWindow(winLoc)
+                        navBarTopPx = winLoc[1]
+                        val rootH = navBg.rootView.height
+                        if (rootH <= 0) return null
+                        val inset = rootH - winLoc[1]
+                        if (inset in 1..200) {
+                            bottomInsetTrusted = true
+                            bottomInsetSource = "navBg"
+                            val wi = windowInsetsBottomInset(a)
+                            if (wi != null && wi != inset) {
+                                insetDisagreement =
+                                    "navBg=$inset windowInsets=$wi"
+                            }
+                            return inset
+                        }
+                        return null
+                    }
+                    // Present but not laid out yet: unknown for now.
+                    // Count toward the gesture conclusion ONLY when
+                    // the view HAS been laid out with height 0 — a
+                    // view that simply has not been laid out yet
+                    // concludes nothing (slow layout).
+                    if (navBg.isLaidOut) {
+                        navBgZeroSweeps++
+                        if (navBgZeroSweeps >= 2) {
+                            navBarTopPx = 0
+                            val wi = windowInsetsBottomInset(a)
+                            bottomInsetTrusted = true
+                            bottomInsetSource =
+                                if (wi != null) "windowInsets" else "gesture-0"
+                            return wi ?: 0
+                        }
+                    }
+                    return null
+                }
+                // No navigationBarBackground view at all: gesture
+                // nav. The gesture handle inset is non-zero, so the
+                // system's own reading is the source — not an
+                // assumed 0 (which would put the bar on the handle).
+                navBarTopPx = 0
+                navBgZeroSweeps = 0
+                val wi = windowInsetsBottomInset(a)
+                bottomInsetTrusted = true
+                bottomInsetSource =
+                    if (wi != null) "windowInsets" else "gesture-0"
+                return wi ?: 0
+            }
+        } catch (ignored: Throwable) {
+        }
+        // FALLBACK: the coordinator difference (1.19.1 retry gate).
+        // ONLY valid before growth (see fallbackBlocked): after
+        // growth the difference reads 0 by construction. A 0 result
+        // is rejected outright — it can never be a measurement.
+        return try {
+            if (!fallbackBlocked.contains(coordinator) &&
+                coordinator.height > 0 && parent.height > coordinator.height) {
+                val d = parent.height - coordinator.height
+                if (d in 1..200) {
+                    bottomInsetTrusted = false
+                    bottomInsetSource = "fallback"
+                    d
+                } else null
+            } else null
+        } catch (ignored: Throwable) {
+            null
         }
     }
 

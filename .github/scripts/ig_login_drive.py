@@ -261,6 +261,72 @@ def shell(*args, timeout=60):
     return adb("shell", *args, timeout=timeout)
 
 
+# --- 1.19.3 round 2 (Opus §5): navigation-mode / gesture-inset reads.
+# Cached per run: dumpsys window is slow (seconds), and the gesture
+# branch runs on every tap check. Both swallow every failure and
+# return None — a missing adb binary (offline tests) or a timed-out
+# dumpsys must never crash a probe.
+_NAV_MODE_CACHE = None
+_NAV_MODE_KNOWN = False
+_GESTURE_INSET_CACHE = None
+_GESTURE_INSET_KNOWN = False
+
+
+def get_navigation_mode():
+    """adb shell settings get secure navigation_mode: '0' = 3-button,
+    '1' = old 2-button nav (also a bottom bar), '2' = gesture.
+    Returns the stripped string, or None when the setting cannot be
+    read. Cached per run."""
+    global _NAV_MODE_CACHE, _NAV_MODE_KNOWN
+    if _NAV_MODE_KNOWN:
+        return _NAV_MODE_CACHE
+    _NAV_MODE_KNOWN = True
+    _NAV_MODE_CACHE = None
+    try:
+        out, _, rc = shell("settings", "get", "secure", "navigation_mode",
+                           timeout=15)
+        if rc == 0 and out.strip() and out.strip() != "null":
+            _NAV_MODE_CACHE = out.strip()
+    except Exception:
+        _NAV_MODE_CACHE = None
+    return _NAV_MODE_CACHE
+
+
+def get_gesture_inset(screen_h):
+    """Real gesture inset from `adb shell dumpsys window`: parse the
+    navigationBars InsetsSource frame and return
+    screen_h - frame.top (px), or None when dumpsys is unavailable
+    or unparseable. The parser is deliberately tolerant — the line
+    format differs across Android versions ('navigationBars' vs
+    'ITYPE_NAVIGATION_BAR', 'mFrame=' vs 'frame=') — and takes the
+    LARGEST inset among the matches (fail-closed: the strictest
+    bar-bottom limit). Cached per run."""
+    global _GESTURE_INSET_CACHE, _GESTURE_INSET_KNOWN
+    if _GESTURE_INSET_KNOWN:
+        return _GESTURE_INSET_CACHE
+    _GESTURE_INSET_KNOWN = True
+    _GESTURE_INSET_CACHE = None
+    try:
+        out, _, rc = shell("dumpsys", "window", timeout=30)
+    except Exception:
+        return None
+    if rc != 0 or not out:
+        return None
+    insets = []
+    for line in out.splitlines():
+        norm = line.lower().replace("_", "")
+        if "navigationbar" not in norm or "frame" not in norm:
+            continue
+        m = re.search(r"\[(\d+),\s*(\d+)\]\[(\d+),\s*(\d+)\]", line)
+        if m:
+            top = int(m.group(2))
+            if 0 <= top <= screen_h:
+                insets.append(screen_h - top)
+    if insets:
+        _GESTURE_INSET_CACHE = max(insets)
+    return _GESTURE_INSET_CACHE
+
+
 def tap(x, y):
     shell("input", "tap", str(x), str(y))
     time.sleep(1)
@@ -1493,20 +1559,26 @@ def _res_node(nodes, suffix):
 
 
 def check_geometry(nodes, label):
-    """1.19.2 tab-switch geometry acceptance: after a tab switch the
-    settled screen must be geometrically sound — the bug class the
-    1.19.1 probe was CLEAN on while it was live on Hossein's phone
-    (feed pushed ~156dp down with a black band on top, wordmark
-    missing, capsule gone; Reels fine 10 min later). The colour-spread
-    burst test cannot see any of that, so this asserts MEASURED
-    geometry from the dump:
+    """1.19.2 tab-switch geometry acceptance (fix #7 in 1.19.3): after
+    a tab switch the settled screen must be geometrically sound — the
+    bug class the 1.19.1 probe was CLEAN on while it was live on
+    Hossein's phone (feed pushed ~156dp down with a black band on
+    top, wordmark missing, capsule gone; Reels fine 10 min later).
+    The colour-spread burst test cannot see any of that, so this
+    asserts MEASURED geometry from the dump:
 
-      * the capsule bar: all 5 tabs present, sharing one band in the
-        bottom fifth of the screen, AND the bar the last child of the
-        wrapper (later child = painted on top — the 1.19.1 probe dump
-        ui_step_tab04after proves Instagram re-orders the wrapper's
-        children on tab switches; a bar painted over is invisible
-        even with the right background);
+      * the capsule bar: all 5 tabs present, sharing one band, AND
+        the bar the last child of the wrapper (later child = painted
+        on top — the 1.19.1 probe dump ui_step_tab04after proves
+        Instagram re-orders the wrapper's children on tab switches;
+        a bar painted over is invisible even with the right
+        background). The band's BOTTOM edge is governed by an
+        explicit no-overlap check against navigationBarBackground
+        (fix #7): the old "bottom-fifth band" criterion PASSED the
+        broken 1.19.2 position (bar [32,1168][688,1264] sits inside
+        the bottom fifth 1024-1280) while its tab centres (y=1216)
+        sat INSIDE the system nav bar — every tap after the first
+        hit SystemUI and backgrounded the app;
       * the home feed (when the stories tray is present): the header
         exists and sits just below the status bar (top 40-56 px on
         the 720x1280 emulator, where the bar is 48), the tray is never
@@ -1571,6 +1643,90 @@ def check_geometry(nodes, label):
         if screen_h and max(bottoms) > screen_h:
             failures.append("tab band below screen bottom (%d of %d)"
                             % (max(bottoms), screen_h))
+        # --- fix #7 (1.19.3): the bar must never overlap the system
+        # nav bar (see the docstring above). Ground truth is the
+        # navigationBarBackground node, present in every dump at
+        # [0,1184][720,1280] on the emulator. A SIDE nav bar
+        # (landscape: tall thin view, width < height) contributes
+        # nothing to the BOTTOM inset, so its top (0) must never be
+        # used as an overlap limit — it falls through to the
+        # gesture-style bottom rule instead (round 2).
+        nav = _res_node(nodes, "android:id/navigationBarBackground")
+        nav_top = None
+        nav_side = False
+        if nav is not None:
+            nav_r = _rect(nav)
+            if nav_r:
+                if nav_r[2] - nav_r[0] < nav_r[3] - nav_r[1]:
+                    nav_side = True
+                    result["measured"]["nav_bar_side"] = True
+                else:
+                    nav_top = nav_r[1]
+                    result["measured"]["nav_bar_top"] = nav_top
+        if nav_top is not None:
+            if max(bottoms) > nav_top:
+                failures.append("tab bar overlaps the system nav bar "
+                                "(bar bottom %d > nav top %d — taps "
+                                "land on SystemUI)" % (max(bottoms), nav_top))
+            centres = [(t + b) // 2 for t, b in zip(tops, bottoms)]
+            for c in centres:
+                if c >= nav_top:
+                    failures.append("tab centre y=%d inside the system "
+                                    "nav bar (top %d)" % (c, nav_top))
+                    break
+        elif screen_h:
+            # No BOTTOM nav bar: gesture nav (node absent) or a side
+            # nav bar (landscape). First, a missing node is NOT proof
+            # of gesture nav — uiautomator can drop the node, and on
+            # 3-button nav (navigation_mode 0, or old 2-button 1) a
+            # bottom bar EXISTS. In that case the overlap check
+            # cannot run at all: record UNVERIFIABLE and skip the
+            # bottom rule instead of falling through to the weaker
+            # gesture check (round 2, Opus §5). The other checks
+            # (band, order, header) still run below.
+            mode = get_navigation_mode()
+            if nav is None and not nav_side and mode in ("0", "1"):
+                result["note"] = ("navBg node missing but "
+                                  "navigation_mode=%s (bottom bar "
+                                  "exists) — UNVERIFIABLE, not gesture "
+                                  "nav" % mode)
+                result["measured"]["nav_unverifiable"] = True
+                log("geometry %s: navBg missing but mode=%s — "
+                    "UNVERIFIABLE" % (label, mode))
+            else:
+                # Gesture nav (or side nav bar): the bar must sit
+                # above the gesture area PLUS the 8dp gap the margin
+                # formula always adds (saved 0 + 8dp + inset). The
+                # real gesture inset comes from dumpsys window
+                # (get_gesture_inset). Opus's bare
+                # bar_bottom <= screen_h - gesture_inset passes the
+                # broken 1.19.2 geometry exactly when the inset is
+                # 16 px (1264 <= 1264) — the -16 gap is what makes
+                # the boundary fail. Correct geometry: bottom =
+                # screen_h - inset - 16 (inset 16 -> 1248, 24 ->
+                # 1240).
+                inset = get_gesture_inset(screen_h)
+                if inset is not None:
+                    limit = screen_h - inset - 16
+                    result["measured"]["gesture_inset"] = inset
+                    result["measured"]["gesture_limit"] = limit
+                    if max(bottoms) > limit:
+                        failures.append("tab bar bottom %d above the "
+                                        "gesture area (limit %d = screen "
+                                        "%d - gesture inset %d - 8dp gap)"
+                                        % (max(bottoms), limit, screen_h,
+                                           inset))
+                else:
+                    # dumpsys unavailable: strict comparison against
+                    # the 8dp gap alone. A correct bar on a 0-inset
+                    # device (bottom exactly screen_h - 16) would
+                    # false-fail here, so this is a fallback only.
+                    if max(bottoms) >= screen_h - 16:
+                        failures.append("tab bar bottom %d with no "
+                                        "system nav bar and no readable "
+                                        "gesture inset (expected < %d — "
+                                        "8dp gap, strict)"
+                                        % (max(bottoms), screen_h - 16))
 
     # --- wrapper child order: the bar must be painted last ---
     idx = {}
@@ -1640,6 +1796,54 @@ def check_geometry(nodes, label):
     STATUS.setdefault("geometry_assertions", {})[label] = result
     save_status()
     return result
+
+
+def pre_tap_gate(dump_fn, sleep_fn=time.sleep):
+    """1.19.3 round 2 (Opus §5): the pre-tap geometry gate takes up
+    to 3 dumps ~500 ms apart and declares GEOMETRY_BROKEN only if
+    EVERY attempt is BROKEN — a single dump taken while the bar is
+    still animating in can false-fail. Any OK passes immediately
+    (no further dumps). All SKIPPED (bar not found / dump failed)
+    is NOT_READY: the run proceeds, fail-open on missing evidence,
+    with the per-tap checks as the second line of defence. Mixed
+    BROKEN + SKIPPED likewise proceeds — there is no positive
+    BROKEN evidence on every attempt.
+    A transient BROKEN that a later attempt clears does NOT poison
+    the run: check_geometry sets STATUS['geometry_broken'] as a
+    side effect, so the flag is restored to its pre-gate value when
+    the gate passes. dump_fn(attempt) must return parsed nodes (or
+    a falsy value on failure). Returns (passed, results)."""
+    broken_before = STATUS.get("geometry_broken", False)
+    results = []
+    for attempt in range(1, 4):
+        try:
+            nodes = dump_fn(attempt)
+        except Exception:
+            nodes = None
+        r = check_geometry(nodes, "feed_settled_%d" % attempt)
+        results.append(r)
+        if r["result"] == "OK":
+            break
+        if r["result"] == "SKIPPED":
+            # All-BROKEN is impossible now — NOT_READY, proceed.
+            break
+        if attempt < 3:
+            sleep_fn(0.5)
+    if any(r["result"] == "OK" for r in results):
+        passed = True
+    elif all(r["result"] == "BROKEN" for r in results):
+        passed = False
+    else:
+        passed = True
+    if passed:
+        STATUS["geometry_broken"] = broken_before
+        if any(r["result"] == "BROKEN" for r in results):
+            log("pre-tap gate: transient BROKEN cleared by a later "
+                "attempt — proceeding (per-tap checks remain)")
+    else:
+        log("pre-tap gate: BROKEN on all %d attempts" % len(results))
+    save_status()
+    return passed, results
 
 
 def run_transition_test():
@@ -2144,6 +2348,35 @@ def main():
             # tap loop's dump-failure fallback needs last-known tab
             # coordinates (re-probe 3: dumps die on the Reels tab).
             remember_tabs(nodes)
+            # Fix #7 (1.19.3): PRE-TAP geometry gate. The 1.19.2
+            # probe's tap1_home check PASSED the broken bar (the old
+            # bottom-fifth criterion), and only tap 2's SystemUI
+            # HOME press revealed it — after which the run burned 6
+            # relaunches. So the geometry is asserted on FRESH dumps
+            # BEFORE any tap is sent: a BROKEN bar fails the run
+            # here (GEOMETRY_BROKEN) instead of tapping into
+            # SystemUI. Round 2 (Opus §5): 2–3 dumps ~500 ms apart,
+            # BROKEN only if EVERY attempt agrees — a single dump
+            # taken while the bar is still animating in can
+            # false-fail; all-SKIPPED is NOT_READY and the run
+            # proceeds (fail-open on missing evidence, fail-closed
+            # on positive BROKEN evidence); the per-tap checks
+            # remain as the second line of defence. The gate is
+            # skipped outright when the deadline is already reached
+            # — the tap loop's own deadline check TIMEOUTs right
+            # after.
+            if not past_deadline(DEADLINE_MARGIN_SEC):
+                gate_ok, gate_results = pre_tap_gate(
+                    lambda i: parse_dump(dump("feed_gate%d" % i)))
+                if not gate_ok:
+                    detail = "; ".join(
+                        "; ".join(v.get("failures", []))
+                        for v in gate_results
+                        if v.get("result") == "BROKEN")
+                    return finish("GEOMETRY_BROKEN",
+                                  "feed bar geometry broken before the "
+                                  "first tap (%d dumps agree): %s"
+                                  % (len(gate_results), detail[:600]))
             # 1.11 capsule-fix acceptance test: 8 tab taps
             # home -> reels -> direct -> profile -> home -> reels ->
             # direct -> home, screenshot + UI dump after EVERY tap.
