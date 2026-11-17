@@ -2,6 +2,7 @@ package ir.rdx.gram.theme
 
 import android.app.Activity
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
@@ -110,6 +111,24 @@ import java.util.WeakHashMap
  *    transparent nav bar. The coordinator is grown to the true bottom
  *    (1280) and the window/decor background is set black, so the
  *    strip is feed content — or black, never white.
+ *    (1.19.1 correction: that theory proved wrong — the strip stayed
+ *    light in the 1.19 re-probe #2 screenshots. See below.)
+ * 1.19.1 (on top of 1.19) — the white strip's real painter:
+ *  - the 1.19 re-probe #2 dumps name it: a framework view with id
+ *    android:id/navigationBarBackground, a direct child of the decor,
+ *    sitting at exactly [0,1184][720,1280] — the strip, to the pixel.
+ *    The window attribute window.navigationBarColor = TRANSPARENT
+ *    (set on every sweep) never reaches it on this build, and the
+ *    black window/decor/content backgrounds never show because this
+ *    view sits above them and paints the strip light itself.
+ *    blackenNavBarBackground recolors the VIEW itself, every sweep —
+ *    but only when its current background is an opaque light colour
+ *    (alpha >= 200, luminance > 128). The same view is present at the
+ *    same bounds in the Reels dump, where it is transparent and the
+ *    video fills to the bottom — so the guard is what keeps Reels
+ *    full-bleed: transparent and already-dark backgrounds are left
+ *    untouched, and a blackened view never matches the predicate
+ *    again, so a settled state is a no-op.
  *  - the top scrim is now a smoother 5-stop fade ending just below
  *    the status icons (statusBarHeight + 12dp), still very light.
  *
@@ -159,6 +178,12 @@ object FullScreenHook {
     private val pagerHeightConfirmed: MutableSet<View> =
         Collections.newSetFromMap(WeakHashMap<View, Boolean>())
     private val escalationCapped: MutableSet<View> =
+        Collections.newSetFromMap(WeakHashMap<View, Boolean>())
+
+    // 1.19.1: views whose navigationBarBackground state was logged once
+    // (no background drawable, or a background that is not a plain
+    // colour) — so the sweep does not spam the log every ~400 ms.
+    private val navBarBgLogged: MutableSet<View> =
         Collections.newSetFromMap(WeakHashMap<View, Boolean>())
 
     // 1.19: the bottom inset the coordinator loses to the system nav
@@ -256,7 +281,73 @@ object FullScreenHook {
         } catch (ignored: Throwable) {
         }
         try {
+            // 1.19.1: the decor's navigationBarBackground view paints
+            // the bottom strip light even with the window colour
+            // transparent — recolor the view itself when it is
+            // opaque-light (Reels, where it is transparent, is left
+            // untouched by the guard inside).
+            blackenNavBarBackground(a)
+        } catch (ignored: Throwable) {
+        }
+        try {
             attachTopScrim(a)
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /**
+     * 1.19.1: recolor the decor's navigation-bar background view.
+     *
+     * The view (android:id/navigationBarBackground, a direct child of
+     * the decor) is the framework's own nav-bar background: on the
+     * 1.19 probe it sits at exactly [0,1184][720,1280] and paints the
+     * strip light, even though window.navigationBarColor is set to
+     * TRANSPARENT on every sweep — the window attribute does not reach
+     * it on this build. The same view is transparent on the Reels
+     * screen (video fills to the bottom), so this only ever writes
+     * when the current background is an OPAQUE LIGHT colour: alpha
+     * >= 200 and luminance > 128. Transparent (Reels), semi-transparent
+     * and already-dark backgrounds are left alone, and a view once
+     * blackened no longer matches the predicate — a settled state is
+     * a no-op, so this can never loop or flicker. A missing view, an
+     * invisible view, no background, or a non-colour background are
+     * all skipped (the last two logged once per instance, so the
+     * probe log shows exactly which case held).
+     */
+    private fun blackenNavBarBackground(a: Activity) {
+        try {
+            val decor = a.window?.decorView as? ViewGroup ?: return
+            val navBg = decor.findViewById<View>(android.R.id.navigationBarBackground)
+                ?: return
+            if (navBg.visibility != View.VISIBLE) return
+            val drawable = navBg.background
+            if (drawable == null) {
+                if (navBarBgLogged.add(navBg)) {
+                    RdxLog.d("fullscreen navBarBackground has no background drawable")
+                }
+                return
+            }
+            val bg = drawable as? ColorDrawable
+            if (bg == null) {
+                if (navBarBgLogged.add(navBg)) {
+                    RdxLog.d(
+                        "fullscreen navBarBackground unexpected background: " +
+                            drawable.javaClass.simpleName
+                    )
+                }
+                return
+            }
+            val c = bg.color
+            if (Color.alpha(c) >= 200 &&
+                (Color.red(c) * 299 + Color.green(c) * 587 +
+                    Color.blue(c) * 114) / 1000 > 128
+            ) {
+                navBg.setBackgroundColor(Color.BLACK)
+                RdxLog.d(
+                    "fullscreen navBarBackground #" +
+                        Integer.toHexString(c) + " -> black"
+                )
+            }
         } catch (ignored: Throwable) {
         }
     }
