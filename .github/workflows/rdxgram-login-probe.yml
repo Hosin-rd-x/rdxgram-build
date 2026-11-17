@@ -342,5 +342,6 @@ jobs:
             shot_*.png
             logcat-final.txt
             logcat-drag.txt
+            logcat-taps.txt
             crash-final.txt
           retention-days: 30

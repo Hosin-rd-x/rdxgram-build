@@ -1515,18 +1515,35 @@ def detect_flat_bar_frame(path):
     background frame Instagram's bar controller repaints on page
     switches (1.19 capsule flash)?
 
-    The capsule is a translucent vertical gradient pill, so four rows
-    across it (y=1082/1120/1158/1166, between the icons) always
-    differ from each other; a flat repaint is one solid colour, so
-    all four rows read identical. Measured on the real 1.18 probe
-    shots (capsule, good): row spreads 35-44; on a synthetic flat
-    frame (the feed shot with the bar strip painted solid #121212):
-    spread exactly 0.0. Thresholds sit in the gap: spread < 5
-    -> 'flat', 5-15 -> 'unclear', >= 15 -> 'capsule'. A stock bar
-    background with its own strong gradient could read 'capsule'
-    (false negative) — the burst shots are eyeballed by the monitor
-    as the backstop, and the pre-draw guard's logcat lines are the
-    primary evidence either way. Returns (verdict, evidence dict)."""
+    Two independent readings, because either alone has a blind spot:
+      * ROW SPREAD: the capsule is a translucent vertical gradient
+        pill, so four rows across it (y=1082/1120/1158/1166, between
+        the icons) always differ from each other; a flat repaint is
+        one solid colour, so all four rows read identical. Measured
+        on the real 1.18 probe shots (capsule, good): row spreads
+        35-44; on a synthetic flat frame (the feed shot with the bar
+        strip painted solid #121212): spread exactly 0.0. Thresholds
+        sit in the gap: spread < 5 -> 'flat', 5-15 -> 'unclear',
+        >= 15 -> 'capsule'.
+      * PILL STROKE (1.19.4): the spread test reads the FEED BEHIND
+        the capsule as much as the capsule — over uniform white feed
+        content a healthy capsule is invisible by construction, and
+        the 1.19.3 probe's r2h_0 shot (rows all ~255) is a REAL flat
+        frame, proven by the stroke, not a detector artifact. The
+        capsule's 1 px stroke survives over any background: the pill's
+        top edge (y=1072-1073, away from the icons) reads ~0.78-0.86x
+        the feed directly above it (y=1060) in day mode (black-14%
+        stroke), while a flat repaint reads the feed itself (ratio
+        ~1.00 for a white repaint, ~0.07 for a dark one). So when the
+        feed above is bright enough to tell (>80), a ratio in
+        0.70-0.93 is positive evidence for the capsule, and a ratio
+        >= 0.97 or <= 0.30 is positive evidence for a flat repaint;
+        anything between is no opinion. A stock bar background with
+        its own strong gradient could read 'capsule' (false negative)
+        — the burst shots are eyeballed by the monitor as the
+        backstop, and the pre-draw guard's logcat lines are the
+        primary evidence either way. Returns (verdict, evidence
+        dict)."""
     png = _png_pixels(path)
     if png is None:
         return "unclear", {}
@@ -1537,11 +1554,36 @@ def detect_flat_bar_frame(path):
     spread = max(rows) - min(rows)
     ev = {"spread": round(spread, 1),
           "rows": [round(v, 1) for v in rows]}
-    if spread < 5.0:
+    # --- pill-stroke check (1.19.4): the darker of the two stroke
+    # rows (1dp = 2 px at xhdpi) against the feed just above the
+    # pill. Only when the feed above is bright (>80): over a dark
+    # feed the ratio is noise, and the spread test already works
+    # there (a capsule over dark content always spreads).
+    stroke = None
+    edge = None
+    above = _row_mean_lum(png, 1060, xs)
+    if above is not None and above > 80.0:
+        e1072 = _row_mean_lum(png, 1072, xs)
+        e1073 = _row_mean_lum(png, 1073, xs)
+        vals = [v for v in (e1072, e1073) if v is not None]
+        if vals:
+            edge = min(vals)
+            ratio = edge / above
+            ev["stroke_ratio"] = round(ratio, 2)
+            ev["stroke_edge"] = round(edge, 1)
+            ev["stroke_above"] = round(above, 1)
+            if 0.70 <= ratio <= 0.93:
+                stroke = "capsule"
+            elif ratio >= 0.97 or ratio <= 0.30:
+                stroke = "flat"
+            ev["stroke"] = stroke
+    if spread >= 15.0:
+        return "capsule", ev
+    if stroke == "capsule":
+        return "capsule", ev
+    if spread < 5.0 and stroke in ("flat", None):
         return "flat", ev
-    if spread < 15.0:
-        return "unclear", ev
-    return "capsule", ev
+    return "unclear", ev
 
 
 def _rect(node):
@@ -1986,6 +2028,39 @@ def capture_drag_logcat():
     return lines
 
 
+def capture_taps_logcat():
+    """Snapshot logcat IMMEDIATELY after the 8-tap sequence, before
+    the transition test: the 1.19.3 probe's logcat-final.txt had ZERO
+    RdxGramTheme lines and logcat.txt ended before the feed was
+    reached, so switch-time hook logs (chrome ... discoveries,
+    capsule re-applied in pre-draw, geometry guard:, the inset
+    measurement line) were never captured — the 1.19.3 list
+    registration line and the guard lines are unobservable in that
+    probe, which is why defect (a)'s trigger is timing-labelled
+    rather than log-proven. Writes logcat-taps.txt (full dump) and
+    logs the theme lines found, so the evidence survives even if the
+    final capture loses them. The existing final capture in finish()
+    is untouched. Returns the matching lines (diagnostics only — no
+    secrets)."""
+    out, _, _ = adb("logcat", "-d", timeout=90)
+    try:
+        with open("logcat-taps.txt", "w", encoding="utf-8") as fh:
+            fh.write(out)
+    except OSError:
+        pass
+    lines = [l.strip() for l in out.splitlines() if "RdxGramTheme" in l]
+    chrome = sum("chrome " in l for l in lines)
+    guard = sum("capsule re-applied" in l for l in lines)
+    geo = sum("geometry guard:" in l for l in lines)
+    inset = sum("fullscreen bottom inset measured:" in l for l in lines)
+    log(f"taps logcat snapshot: {len(lines)} RdxGramTheme line(s) "
+        f"({chrome} chrome, {guard} guard, {geo} geometry-guard, "
+        f"{inset} inset)")
+    for l in lines[:10]:
+        log(f"  {l[:200]}")
+    return lines
+
+
 def run_drag_test():
     """1.13 drag-lens acceptance test: slow horizontal drag across
     the tab bar, Home -> Reels. Screenshot mid-drag (the lens should
@@ -2410,6 +2485,15 @@ def main():
             if not check_alive("8-tap tab sequence"):
                 return finish("CRASHED_AFTER_FEED",
                               "FATAL or dead process after tab sequence")
+            # 1.19.4: mid-run logcat snapshot right after the taps
+            # (see capture_taps_logcat) — the 1.19.3 probe lost every
+            # switch-time hook line to ring-buffer rotation before
+            # the final capture. Non-fatal: a logcat failure must
+            # never fail the probe.
+            try:
+                capture_taps_logcat()
+            except Exception as e:
+                log(f"taps logcat snapshot failed (non-fatal): {e}")
             # 1.19 capsule-flash acceptance test (see
             # run_transition_test): Home -> Reels -> Home bursts.
             if past_deadline(DEADLINE_MARGIN_SEC):

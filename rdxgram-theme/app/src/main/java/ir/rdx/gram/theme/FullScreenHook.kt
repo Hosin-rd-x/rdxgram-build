@@ -337,6 +337,10 @@ object FullScreenHook {
     private var cachedPanelRef: WeakReference<View>? = null
     private var cachedWrapperRef: WeakReference<View>? = null
 
+    // 1.19.4: cached feed list for assertFeedListGeometry (same
+    // per-layout-pass rhythm as the panel/wrapper above).
+    private var cachedFeedListRef: WeakReference<View>? = null
+
     // 1.19.2: parent heights seen by the growViewToParent escalation
     // (a fixed height is pinned only from a stable parent height —
     // see growViewToParent), and feed-list padding values that match
@@ -470,6 +474,96 @@ object FullScreenHook {
                     if (fitsCleared.add(wrapper)) wrapper.fitsSystemWindows = false
                 } catch (ignored: Throwable) {
                 }
+            }
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /**
+     * 1.19.4: synchronously re-assert the feed list's layout top.
+     * Called from TabBarHook's layout listener on EVERY layout pass
+     * (next to assertPanelGeometry) and from the sweep (applyGeometry,
+     * after insetTopChrome, so a bad registration is corrected in the
+     * same sweep). The 1.19.3 probe proved the list can be registered
+     * as "content below the header" (targetTop 160 = header 112 +
+     * shift 48) and pinned there by convergeChrome — the bar got a
+     * geometry guard in 1.19.2 and the panel got assertPanelGeometry,
+     * but nothing re-asserted the list, so the wrong margin stuck for
+     * the whole run (list [0,160][720,1280], tray 320, after every
+     * switch back to Home). The list's stock top is 0 (FrameLayout
+     * parents; the header floats OVER it — the padding, not a margin,
+     * is what puts the content below the header), so clearing its top
+     * margin restores stock. Only writes when topMargin != 0, so a
+     * settled layout is a no-op. Scoped to the feed: it only acts when
+     * the list sits under the feed's own containers
+     * (refreshable_container / sticky_header_list) — android:id/list
+     * is a shared id and other screens may legitimately position their
+     * list elsewhere. translationY is deliberately NOT touched: the
+     * probe dump proves it was 0 in the broken state, and resetting it
+     * every layout pass would fight pull-to-refresh overscroll. The
+     * list's top padding (shiftFeedListTop) is also untouched — padding
+     * 160 is correct behaviour (tray below the shifted header); the
+     * bug was the margin, not the padding. The list is cached
+     * (WeakReference) so the per-pass cost is pointer reads + int
+     * compares; the findByName walk runs only when the cached view is
+     * gone (rebuilt by Instagram). A view's layout top can only change
+     * on a layout pass, never on a bare invalidate — so asserting here,
+     * before the draw that follows the layout, means no pushed-down
+     * frame can paint.
+     */
+    fun assertFeedListGeometry(a: Activity?) {
+        if (a == null) return
+        try {
+            val root = a.window?.decorView as? ViewGroup ?: return
+            val pkg = a.packageName
+            var list = cachedFeedListRef?.get()
+            if (list == null || !list.isAttachedToWindow) {
+                list = findByNameInPackage(root, a, "list", "android")
+                cachedFeedListRef = if (list != null) WeakReference(list) else null
+            }
+            if (list == null) return
+            // Feed-only scoping: the list must sit under the feed's own
+            // containers (the chain is list > refreshable_container >
+            // sticky_header_list > ...). Resolved per call — a resource
+            // lookup, cheap next to the layout pass itself.
+            val containerId = try {
+                a.resources.getIdentifier("refreshable_container", "id", pkg)
+            } catch (ignored: Throwable) {
+                0
+            }
+            val stickyId = try {
+                a.resources.getIdentifier("sticky_header_list", "id", pkg)
+            } catch (ignored: Throwable) {
+                0
+            }
+            var feed = false
+            var anc = list.parent as? View
+            var hops = 0
+            while (anc != null && hops < 8) {
+                val id = anc.id
+                if (id != 0 && (id == containerId || id == stickyId)) {
+                    feed = true
+                    break
+                }
+                anc = anc.parent as? View
+                hops++
+            }
+            if (!feed) return
+            clearTopMargin(list)
+            // Defense in depth: the same wrong margin on a container
+            // moves the list with it (findContentBelow's ancestor hole,
+            // now closed at the source — this is the backstop). The
+            // containers sit at [0,0] in every good dump; clearing is
+            // a no-op unless something set a margin on them.
+            var c = list.parent as? View
+            var hops2 = 0
+            while (c != null && hops2 < 8) {
+                val id = c.id
+                if (id != 0 && (id == containerId || id == stickyId)) {
+                    clearTopMargin(c)
+                }
+                c = c.parent as? View
+                hops2++
             }
         } catch (ignored: Throwable) {
         }
@@ -673,6 +767,14 @@ object FullScreenHook {
             // 1.19: push the top bars below the status icons and
             // shift the content below them by the same amount.
             insetTopChrome(a, root, pkg)
+        } catch (ignored: Throwable) {
+        }
+        try {
+            // 1.19.4: re-assert the feed list's layout top on the
+            // sweep too (see assertFeedListGeometry) — the backstop
+            // for the per-layout-pass assert, correcting a bad
+            // registration in the same sweep it was made.
+            assertFeedListGeometry(a)
         } catch (ignored: Throwable) {
         }
         try {
@@ -1197,6 +1299,22 @@ object FullScreenHook {
     /** Record a newly found chrome view and apply its first shift. */
     private fun discoverChrome(v: View, targetTop: Int, isHeader: Boolean) {
         try {
+            // 1.19.4 (defense in depth): the feed list — or anything
+            // containing it — must never be registered as chrome.
+            // findContentBelow already excludes it (see there); this
+            // is the backstop if a future caller passes it. (1.19.3
+            // probe: the list was registered as content-below with
+            // targetTop 160 and pinned there by convergeChrome.)
+            // android.R.id.list is the framework id behind
+            // "android:id/list"; findViewById also matches the view
+            // itself, so one check covers "is" and "contains".
+            if (v.findViewById<View>(android.R.id.list) != null) {
+                RdxLog.d(
+                    "chrome refused: " + describe(v) +
+                        " is or contains the feed list (targetTop " + targetTop + ")"
+                )
+                return
+            }
             val lp = v.layoutParams as? ViewGroup.MarginLayoutParams
             val origMargin = lp?.topMargin ?: 0
             val origTop = windowTop(v)
@@ -1365,10 +1483,41 @@ object FullScreenHook {
     ): View? {
         val minH = dp(a, 100)
         val minW = (screenW * 0.9f).toInt()
+        // 1.19.4: the feed list and everything that contains it (up to
+        // the header's own ancestors, which are shared and cannot
+        // match anyway — they sit at top 0) can never be "content below
+        // a header": shifting one shifts the list with it. The 1.19.3
+        // probe proved the list was registered as content-below with
+        // targetTop 160 and pinned there by convergeChrome; the old
+        // code only skipped DESCENDING into the list, while the match
+        // below ran on the list node itself first. The exclusion is
+        // checked BEFORE the match, and the walk never descends into
+        // an excluded view either (a view has exactly one parent
+        // chain, so pruning the list-only ancestors prunes the list
+        // completely). Common ancestors of header and list are NOT
+        // excluded — the walk must still reach the header's siblings
+        // through them.
+        val listOnlyAncestors = HashSet<View>()
+        if (list != null) {
+            val headerAncestors = HashSet<View>()
+            var h = header.parent as? View
+            while (h != null) {
+                headerAncestors.add(h)
+                h = h.parent as? View
+            }
+            var anc = list.parent as? View
+            while (anc != null && !headerAncestors.contains(anc)) {
+                listOnlyAncestors.add(anc)
+                anc = anc.parent as? View
+            }
+        }
         val stack = ArrayDeque<View>()
         stack.add(panel)
         while (stack.isNotEmpty()) {
             val v = stack.removeLast()
+            if (list != null &&
+                (v === list || listOnlyAncestors.contains(v))
+            ) continue
             if (v !== panel && v !== header) {
                 if (v.isAttachedToWindow) {
                     val top = windowTop(v)
@@ -1381,7 +1530,6 @@ object FullScreenHook {
             }
             val vg = v as? ViewGroup ?: continue
             if (v === header) continue
-            if (list != null && v === list) continue
             for (i in vg.childCount - 1 downTo 0) {
                 val child = vg.getChildAt(i) ?: continue
                 stack.add(child)

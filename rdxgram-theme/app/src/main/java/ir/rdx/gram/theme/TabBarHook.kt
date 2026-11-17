@@ -183,13 +183,23 @@ object TabBarHook {
     // pre-draw path.
     private val locScratch = IntArray(2)
 
-    // 1.19.3 round 2 (Opus §3): the guard must not cancel the draw
-    // forever while the parent is still settling — at most one
-    // cancel in a row, then the next frame draws and the
-    // requestLayout() the fix triggered does its work. Alternating
-    // cancel/draw means the screen can never stay blank; the flag
-    // re-arms as soon as a pre-draw passes clean.
-    private var guardCancelArmed: Boolean = true
+    // 1.19.4: consecutive pre-draws cancelled in a row while a
+    // mismatch persists (see guardAfterApply). The 1.19.3 single-shot
+    // flag (cancelDrawOnce, Opus §3 round 2) let exactly the SECOND
+    // consecutive broken frame through — the 1.19.3 probe's flat frame
+    // (border-proven: pill-top edge pure white 255.0 in
+    // shot_trans_r2h_0 vs 219.0 one second later). apply() cannot
+    // always fix the mismatch on the first pass: it early-returns
+    // when the bar is not laid out yet (height <= 0, the rebuilt bar
+    // mid-switch), and bringToFront() only requests a layout, which
+    // lands on the NEXT frame. So cancel again while the mismatch
+    // persists, capped at GUARD_CANCEL_MAX_STREAK (~5 frames, ~80 ms
+    // at 60 fps) so a parent genuinely fighting us can never blank
+    // the screen for more than that — the anti-blank property Opus
+    // §3 wanted, kept, with the hole closed. A clean pre-draw resets
+    // the streak (see guardPreDraw).
+    private const val GUARD_CANCEL_MAX_STREAK = 5
+    private var guardCancelStreak: Int = 0
 
     /** Arm the hook for this activity. Called on every resume. */
     fun watchActivity(a: Activity?) {
@@ -238,6 +248,17 @@ object TabBarHook {
                 // cached (two WeakReference reads).
                 try {
                     FullScreenHook.assertPanelGeometry(a)
+                } catch (ignored: Throwable) {
+                }
+                // 1.19.4: same rhythm for the feed LIST (see
+                // assertFeedListGeometry): the 1.19.3 probe proved the
+                // list can be registered as "content below the header"
+                // and pinned at top 160 by convergeChrome, and nothing
+                // re-asserted it — the bar got a geometry guard and
+                // the panel got the assert above, but the list had no
+                // per-layout re-assertion of its own.
+                try {
+                    FullScreenHook.assertFeedListGeometry(a)
                 } catch (ignored: Throwable) {
                 }
                 if (!Settings.isBarEnabled(a) && styledBars.isEmpty()) return@addOnGlobalLayoutListener
@@ -294,7 +315,7 @@ object TabBarHook {
                 } else {
                     RdxLog.d("capsule re-applied in pre-draw")
                 }
-                return cancelDrawOnce()
+                return guardAfterApply(cached)
             }
             // 1.19.2: the background is not enough. Instagram re-adds
             // the wrapper's children on tab switches (1.19.1 probe:
@@ -308,9 +329,9 @@ object TabBarHook {
             if (!barGeometryOk(cached)) {
                 apply(cached)
                 RdxLog.d("geometry guard: bar geometry wrong, re-applied in pre-draw")
-                return cancelDrawOnce()
+                return guardAfterApply(cached)
             }
-            guardCancelArmed = true
+            guardCancelStreak = 0
             return true
         }
         // No cached bar: Instagram may have rebuilt it on the page
@@ -326,27 +347,48 @@ object TabBarHook {
         cachedBarRef = WeakReference(bar)
         apply(bar)
         RdxLog.d("capsule re-applied in pre-draw (rebuilt bar found)")
-        return cancelDrawOnce()
+        // One cancel to let the fix land. No streak here: if apply()
+        // could not fix it (bar not laid out yet), the next pre-draw
+        // takes the cached-bar branch above, where guardAfterApply
+        // bounds the cancels — a repeated cancel in THIS branch would
+        // blank screens where Instagram legitimately has no tab bar.
+        return false
     }
 
     /**
-     * 1.19.3 round 2: cancel at most one draw in a row. The first
-     * cancel applies the fix, which requests a layout; if the very
-     * next pre-draw still finds broken geometry, the parent is
-     * fighting us (or still settling) and blanking the screen
-     * forever is worse than one imperfect frame — let it draw. The
-     * flag re-arms as soon as a pre-draw passes clean (see
-     * guardPreDraw), so the next real break is caught again.
-     * No explicit requestLayout() is ever called from this callback
-     * — apply() only sets layout params, the standard mechanism.
+     * 1.19.4: after apply(), did the mismatch actually clear? apply()
+     * cannot always fix it on the first pass — it early-returns when
+     * the bar is not laid out yet (height <= 0, the rebuilt bar
+     * mid-switch), and bringToFront() only requests a layout, which
+     * lands on the NEXT frame. In both cases the very next pre-draw
+     * still finds the mismatch, and the old cancelDrawOnce() let
+     * exactly that frame through (its second consecutive call returns
+     * true) — the 1.19.3 probe's flat frame (border-proven, see
+     * root-cause.md defect (b)). So: cancel again while the mismatch
+     * persists, bounded (max GUARD_CANCEL_MAX_STREAK consecutive
+     * cancels, ~80 ms at 60 fps) so a parent genuinely fighting us
+     * can never blank the screen for more than that — the anti-blank
+     * property Opus §3 wanted, kept, with the hole closed. A clean
+     * pre-draw resets the streak (see guardPreDraw), and the cap
+     * resets it too, so the next real break is caught again.
+     * barGeometryOk is read-only (tag reads + int compares), so this
+     * re-check cannot re-enter apply() or spin a layout loop. No
+     * requestLayout() is ever called from this callback — apply()
+     * only sets layout params, the standard mechanism.
      */
-    private fun cancelDrawOnce(): Boolean {
-        if (!guardCancelArmed) {
-            guardCancelArmed = true
-            return true
+    private fun guardAfterApply(bar: ViewGroup): Boolean {
+        val appliedCapsule = bar.getTag(TAG_CAPSULE_DRAWABLE) as? Drawable
+        val fixed = bar.background === appliedCapsule && barGeometryOk(bar)
+        if (fixed) {
+            guardCancelStreak = 0
+            return false // one cancel to let the fix land
         }
-        guardCancelArmed = false
-        return false
+        if (guardCancelStreak < GUARD_CANCEL_MAX_STREAK) {
+            guardCancelStreak++
+            return false
+        }
+        guardCancelStreak = 0
+        return true // bound reached: let one frame through, then re-arm
     }
 
     /**
