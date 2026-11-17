@@ -125,6 +125,34 @@ snapshotted IMMEDIATELY after the drag test (logcat-drag.txt)
 before the ~40 s dump-retry loop, so the drag RdxLog.d lines
 survive; the existing final capture in finish() is untouched.
 
+1.19.4 probes #1/#2: after the notification dialog was dismissed
+(verified, state UNKNOWN — the feed loading), EVERY later dump
+failed 8 times in a row and the one relaunch did not restore
+them; FINAL DUMP_STUCK, no crash, the app on the feed in the
+stuck shot. Both runs had a video post as the feed's first item
+(probe #1 "Watch more reels", probe #2 a cricket video) — the
+reels-video SurfaceView dump failure from 1.17 re-probe 3, now
+hitting on the feed itself right after the dialog. The same path
+worked in the 1.19.1 and 1.19.3 probes — timing-dependent on
+whether the first item is a video and whether it has started
+playing when the first post-dialog dump runs. Waiting and
+relaunching cannot fix a looping video (proven 2/2); the video
+has to leave the viewport. Fix #9: on the FIRST dump failure
+right after the dialog was dismissed (verification dump saw
+UNKNOWN/FEED), run a one-shot post-NOTIF recovery — wait 10 s
+for the feed to settle, screenshot first, restart uiautomator (a
+timed-out dump can leave a lingering process holding the
+UiAutomation connection), retry one dump; if that still fails,
+swipe up once to scroll the top (video) item off-screen, restart
+uiautomator again, retry one dump. A swipe is a scroll, not a
+tap — it cannot open a reel, grant a permission, or submit
+anything. If dumps still fail, a post-swipe screenshot is
+pixel-checked (bottom strip black + capsule/flat detector +
+feed/viewer label) and recorded in status.json as
+pixel_fallback, so the run still ends DUMP_STUCK but with
+evidence of what the feed actually showed — never a geometry
+assertion that didn't run.
+
 Outputs (working dir): status.json, status.txt, timeline.txt, ui_step*.xml,
 shot_*.png, logcat-final.txt, crash-final.txt.
 Exit code is always 0 — the verdict lives in status.json/status.txt.
@@ -159,7 +187,11 @@ STATUS = {"status": "STARTED", "cold_start_total_ms": None, "fatal_count": 0,
           "code_source": None,
           # 1.19.2: per-switch geometry assertions (see
           # check_geometry); any BROKEN fails the run.
-          "geometry_assertions": {}, "geometry_broken": False}
+          "geometry_assertions": {}, "geometry_broken": False,
+          # Fix #9: screenshot + pixel evidence when dumps cannot be
+          # restored (bottom strip, capsule, feed/viewer label) —
+          # evidence only, never a geometry assertion.
+          "pixel_fallback": None}
 # Bottom-bar tab descs, and their centers from the last dump that had
 # them (see remember_tabs). 1.17 re-probe 3: dumps fail while the
 # reels video SurfaceView is active, so the last-known centers are
@@ -192,6 +224,10 @@ DUMP_SHELL_TIMEOUT = 20    # was the adb default (60) for uiautomator
 DEADLINE_MARGIN_SEC = 60   # no new phase starts in the last minute:
                            # the workflow kills the driver step 60 s
                            # after DEADLINE (1740 s vs 30 min)
+
+# Fix #9 (1.19.4 probes #1/#2): post-NOTIF dump recovery.
+NOTIF_SETTLE_SEC = 10      # feed settle after the dialog is dismissed
+NOTIF_SWIPE_MS = 300       # recovery swipe duration (scroll, not a tap)
 
 
 def past_deadline(margin=0):
@@ -2262,6 +2298,163 @@ def run_drag_test():
     return drag_result
 
 
+# --- Fix #9 (1.19.4 probes #1/#2): post-NOTIF dump recovery --------
+def restart_uiautomator():
+    """Kill any lingering on-device uiautomator processes (best-effort).
+
+    A dump() that times out kills the adb client, but the on-device
+    `uiautomator` process can linger and hold the UiAutomation
+    connection, so every later dump fails fast. The `[u]` bracket
+    trick keeps pkill from matching its own invoking shell (whose
+    cmdline contains the pattern literally); the single quotes keep
+    the device shell from glob-expanding the brackets. A missing
+    pkill binary or no matching process is not an error, and this
+    never touches the app process. Returns True when the command
+    itself ran."""
+    try:
+        _, err, rc = shell("pkill", "-f", "'[u]iautomator'",
+                           timeout=10)
+        log(f"uiautomator restart: pkill rc={rc}"
+            + (f" ({err[:120]})" if err else ""))
+        time.sleep(1)
+        return True
+    except Exception as e:
+        log(f"uiautomator restart failed (non-fatal): {e}")
+        return False
+
+
+def record_pixel_fallback(png_path):
+    """Screenshot + pixel evidence when UI dumps cannot be restored
+    (fix #9). Records STATUS["pixel_fallback"] so the verdict stays
+    honest about what pixels DID show and what never ran:
+      bottom_strip_black: rows 1200-1275 between the icons — the
+          1.19.1 fix-4 black strip reads ~0-5; a white strip (the
+          bug) reads ~230. Threshold 20 sits in the gap.
+      bar: detect_flat_bar_frame() verdict + evidence (the fix-#8
+          capsule/flat detector, proven on real feed shots).
+      screen: detect_drag_switch_from_shot() label ('home' /
+          'reels' / 'unclear') — the light-feed vs dark-viewer
+          thresholds measured on real probe shots.
+    "verified" lists what the pixels showed; "not_verified" lists
+    the geometry assertions, taps, transition and drag tests that
+    never ran. Nothing here ever claims a geometry assertion.
+    Returns the dict (or None when the PNG cannot be decoded)."""
+    png = _png_pixels(png_path)
+    if png is None:
+        log(f"pixel fallback: cannot decode {png_path}")
+        return None
+    xs = [(130, 195), (260, 330), (390, 460), (520, 585)]
+    strip = [_row_mean_lum(png, y, xs)
+             for y in (1200, 1220, 1240, 1260)]
+    strip = [v for v in strip if v is not None]
+    strip_mean = (sum(strip) / len(strip)) if strip else None
+    bar_verdict, bar_ev = detect_flat_bar_frame(png_path)
+    screen_label, screen_ev = detect_drag_switch_from_shot(png_path)
+    fb = {
+        "shot": os.path.basename(png_path),
+        "bottom_strip_mean": (round(strip_mean, 1)
+                              if strip_mean is not None else None),
+        "bottom_strip_black": (strip_mean is not None
+                               and strip_mean < 20.0),
+        "bar": bar_verdict,
+        "bar_evidence": bar_ev,
+        "screen": screen_label,
+        "screen_evidence": screen_ev,
+        "verified": [],
+        "not_verified": ["geometry assertions (no dump ran)",
+                         "8-tap sequence", "transition test",
+                         "drag test"],
+    }
+    if fb["bottom_strip_black"]:
+        fb["verified"].append("bottom strip is black (not white)")
+    if bar_verdict == "capsule":
+        fb["verified"].append("bottom bar reads as the glass capsule")
+    elif bar_verdict == "flat":
+        fb["verified"].append("bottom bar reads as a flat frame")
+    if screen_label == "home":
+        fb["verified"].append("screenshot shows the home feed")
+    elif screen_label == "reels":
+        fb["verified"].append("screenshot shows the Reels viewer")
+    STATUS["pixel_fallback"] = fb
+    save_status()
+    log(f"pixel fallback on {fb['shot']}: strip_mean="
+        f"{fb['bottom_strip_mean']} black={fb['bottom_strip_black']} "
+        f"bar={bar_verdict} screen={screen_label}")
+    return fb
+
+
+def post_notif_recovery():
+    """Recover UI dumps right after the notification dialog was
+    dismissed (fix #9). Runs ONCE per run, only when the dialog's
+    verification dump saw the feed loading (UNKNOWN) or the feed
+    itself — the 1.19.4 probes #1/#2 died here 2/2: the feed's
+    first item was a video post, its SurfaceView wedges
+    uiautomator, and every later dump failed while the video kept
+    playing. Waiting and relaunching cannot fix that (proven 2/2);
+    the video has to leave the viewport:
+      1. wait NOTIF_SETTLE_SEC for the feed to settle;
+      2. screenshot FIRST (visual evidence whatever happens next);
+      3. restart uiautomator (best-effort: a timed-out dump can
+         leave a lingering process holding the UiAutomation
+         connection) and retry one dump;
+      4. if that still fails, swipe UP once to scroll the top
+         (video) item off-screen, restart uiautomator again, and
+         retry one dump;
+      5. if dumps still fail, take a post-swipe screenshot and
+         record pixel evidence (see record_pixel_fallback) — the
+         run stays DUMP_STUCK, but with evidence instead of only
+         a screenshot.
+    The swipe is a scroll gesture, not a tap: it cannot open a
+    reel, grant a permission, or submit anything. Its coordinates
+    come from the recovery screenshot's real size (logical 720x1280
+    otherwise). Returns the fresh node list when a dump succeeds,
+    else None. Never raises: every step is guarded so a recovery
+    failure degrades to the normal bounded retry, never a crash."""
+    try:
+        log("post-NOTIF dump recovery: waiting "
+            f"{NOTIF_SETTLE_SEC}s for the feed to settle")
+        time.sleep(NOTIF_SETTLE_SEC)
+        if not screenshot("shot_feed_recovery"):
+            log("post-NOTIF recovery: recovery screenshot failed; "
+                "continuing with the dump retry anyway")
+        restart_uiautomator()
+        path = dump("step_notif_rec1")
+        nodes = parse_dump(path)
+        if nodes:
+            log("post-NOTIF recovery: dump restored after the "
+                "settle + uiautomator restart (no swipe needed)")
+            return nodes
+        log("post-NOTIF recovery: dump still failing after the "
+            "settle; swiping up once to scroll the top item "
+            "(video) off-screen")
+        png = _png_pixels("shot_feed_recovery.png")
+        if png is not None:
+            w, h, _, _ = png
+            x = w // 2
+            y0 = int(h * 0.70)
+            y1 = int(h * 0.31)
+        else:
+            x, y0, y1 = 360, 900, 400
+        shell("input", "swipe", str(x), str(y0), str(x), str(y1),
+              str(NOTIF_SWIPE_MS))
+        time.sleep(3)
+        restart_uiautomator()
+        path = dump("step_notif_rec2")
+        nodes = parse_dump(path)
+        if nodes:
+            log("post-NOTIF recovery: dump restored after the "
+                "recovery swipe")
+            return nodes
+        log("post-NOTIF recovery: dumps still failing after the "
+            "swipe; recording pixel evidence from a fresh shot")
+        if screenshot("shot_feed_pixels"):
+            record_pixel_fallback("shot_feed_pixels.png")
+        return None
+    except Exception as e:
+        log(f"post-NOTIF recovery error (non-fatal): {e}")
+        return None
+
+
 def finish(status, detail=""):
     STATUS["status"] = status
     STATUS["detail"] = detail
@@ -2302,6 +2495,11 @@ def main():
     # escalation (relaunch) has already been spent for this run.
     dump_fail_runs = 0
     dump_escalated = False
+    # Fix #9: the state the notification dialog's verification dump
+    # saw (UNKNOWN = feed loading, FEED = feed), and whether the
+    # one-shot post-NOTIF recovery has already run.
+    post_notif_state = None
+    post_notif_recovered = False
 
     for step in range(1, 61):
         STATUS["steps"] = step
@@ -2322,45 +2520,75 @@ def main():
             # finishes DUMP_STUCK with a verdict instead of dying
             # on the step timeout.
             dump_fail_runs += 1
-            if dump_fail_runs >= DUMP_FAIL_MAX:
-                if not past_deadline(DEADLINE_MARGIN_SEC):
-                    screenshot("shot_dump_stuck")
-                return finish("DUMP_STUCK",
-                              f"UI dump failed {dump_fail_runs} times "
-                              f"in a row (last screen {last_state}); "
-                              f"uiautomator never returned a fresh "
-                              f"hierarchy")
-            if (dump_fail_runs == DUMP_FAIL_ESCALATE_AT
-                    and not dump_escalated):
-                # One escalation per failure-run: relaunch the app
-                # to unstick uiautomator. BACK is NOT used here:
-                # with no fresh hierarchy the screen is unknown —
-                # the last known screen may already have advanced
-                # to the feed, where BACK would exit the app.
-                # Relaunch is state-independent.
-                dump_escalated = True
-                log(f"UI dump failed {dump_fail_runs} times in a "
-                    f"row; relaunching the app once to unstick "
-                    f"uiautomator (last screen {last_state})")
-                relaunch()
-                time.sleep(5)
-                path = dump(f"step{step:02d}esc")
-                nodes = parse_dump(path)
-                if path is not None:
+            # Fix #9: the first failure right after the notification
+            # dialog was dismissed — the feed's top item is a video
+            # whose SurfaceView wedges uiautomator (1.19.4 probes
+            # #1/#2, 2/2). Recover once (wait + screenshot +
+            # uiautomator restart + scroll the video off-screen)
+            # instead of counting straight toward the futile
+            # relaunch. One shot per run, and never in the last
+            # minute — the normal bounded retry still applies if
+            # the recovery does not restore dumps.
+            recovered = None
+            if (dump_fail_runs == 1
+                    and last_state == "NOTIF_DIALOG"
+                    and post_notif_state in ("UNKNOWN", "FEED")
+                    and not post_notif_recovered
+                    and not past_deadline(DEADLINE_MARGIN_SEC)):
+                post_notif_recovered = True
+                recovered = post_notif_recovery()
+                if recovered is not None:
+                    nodes = recovered
                     dump_fail_runs = 0
                     dump_escalated = False
                     # Fall through to classification with the
                     # fresh nodes.
+            if recovered is None:
+                if dump_fail_runs >= DUMP_FAIL_MAX:
+                    if not past_deadline(DEADLINE_MARGIN_SEC):
+                        screenshot("shot_dump_stuck")
+                    # Fix #9: pixel evidence with the verdict — if
+                    # the recovery already recorded it on the
+                    # post-swipe shot, record it here on the stuck
+                    # shot instead; never a bare DUMP_STUCK.
+                    if STATUS.get("pixel_fallback") is None:
+                        record_pixel_fallback("shot_dump_stuck.png")
+                    return finish("DUMP_STUCK",
+                                  f"UI dump failed {dump_fail_runs} times "
+                                  f"in a row (last screen {last_state}); "
+                                  f"uiautomator never returned a fresh "
+                                  f"hierarchy")
+                if (dump_fail_runs == DUMP_FAIL_ESCALATE_AT
+                        and not dump_escalated):
+                    # One escalation per failure-run: relaunch the app
+                    # to unstick uiautomator. BACK is NOT used here:
+                    # with no fresh hierarchy the screen is unknown —
+                    # the last known screen may already have advanced
+                    # to the feed, where BACK would exit the app.
+                    # Relaunch is state-independent.
+                    dump_escalated = True
+                    log(f"UI dump failed {dump_fail_runs} times in a "
+                        f"row; relaunching the app once to unstick "
+                        f"uiautomator (last screen {last_state})")
+                    relaunch()
+                    time.sleep(5)
+                    path = dump(f"step{step:02d}esc")
+                    nodes = parse_dump(path)
+                    if path is not None:
+                        dump_fail_runs = 0
+                        dump_escalated = False
+                        # Fall through to classification with the
+                        # fresh nodes.
+                    else:
+                        log("relaunch did not restore UI dumps; "
+                            "waiting and retrying the step")
+                        time.sleep(3)
+                        continue
                 else:
-                    log("relaunch did not restore UI dumps; "
-                        "waiting and retrying the step")
+                    log("UI dump failed (no fresh hierarchy); waiting "
+                        "3s and retrying this step without acting")
                     time.sleep(3)
                     continue
-            else:
-                log("UI dump failed (no fresh hierarchy); waiting "
-                    "3s and retrying this step without acting")
-                time.sleep(3)
-                continue
         else:
             dump_fail_runs = 0
             dump_escalated = False
@@ -2740,6 +2968,11 @@ def main():
                               "notification-permission dialog could not "
                               "be dismissed (no button, or still up "
                               "after 2 verified taps)")
+            # Fix #9: remember what the verification dump saw after
+            # the dismissal — the post-NOTIF recovery is only safe
+            # when it was the feed loading (UNKNOWN) or the feed
+            # itself, never a viewer or another dialog.
+            post_notif_state = new_state
             # Dismissed (or the screen changed): the next loop
             # iteration classifies the fresh screen.
             continue
