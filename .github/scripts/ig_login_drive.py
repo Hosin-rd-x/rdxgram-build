@@ -172,6 +172,34 @@ LAST_TAP_NAME = None
 # burned ~4 min). No new expensive step starts once it is spent.
 TAP_BUDGET_SEC = 120
 
+# Fix #5 (1.19 re-probe #2): the main loop's dump-failure retry was
+# unbounded — each failed dump() costs ~40 s and the loop `continue`s
+# without ever classifying, so the same-state guard never fires and
+# the 60-step cap (~40 min) outruns the 30-min step timeout. The
+# driver's own 1740 s deadline is only checked at the top of a step
+# iteration, never inside the FEED branch, so once the feed is
+# reached the 8-tap sequence can run straight past the deadline
+# until the step timeout kills the process — leaving status.json
+# STARTED with no verdict. Grounded in the probe job log: 34
+# "UI dump failed" lines, 09:52:20-10:15:37 UTC (~41 s each).
+DUMP_FAIL_MAX = 8          # consecutive failed dumps -> DUMP_STUCK
+DUMP_FAIL_ESCALATE_AT = 3  # failures before the one relaunch
+DUMP_ATTEMPTS = 2          # was 3 inside dump()
+DUMP_SHELL_TIMEOUT = 20    # was the adb default (60) for uiautomator
+DEADLINE_MARGIN_SEC = 60   # no new phase starts in the last minute:
+                           # the workflow kills the driver step 60 s
+                           # after DEADLINE (1740 s vs 30 min)
+
+
+def past_deadline(margin=0):
+    """True when fewer than `margin` seconds remain before DEADLINE.
+
+    Phase checks use DEADLINE_MARGIN_SEC so no new expensive phase
+    (a tap, the transition test, the drag test) starts in the last
+    minute — the verdict is written while time remains. The main
+    loop's top check uses margin 0: it fires finish() directly."""
+    return time.time() > DEADLINE - margin
+
 # Drag-test timing (fix #4). The swipe runs DRAG_SWIPE_MS on-device,
 # but it only starts after the adb round-trip (~0.2-0.6 s), and each
 # screencap costs another adb round-trip (~0.3-0.5 s), so a single
@@ -290,14 +318,22 @@ def dump(name):
     opened a reel. So the old file is deleted (device AND local)
     before EVERY attempt, the pulled XML is validated, and a total
     failure returns None instead of a stale file. Callers must
-    handle None (the main loop waits and retries the step)."""
+    handle None (the main loop waits and retries the step).
+
+    Fix #5: at most DUMP_ATTEMPTS attempts, each capped at
+    DUMP_SHELL_TIMEOUT seconds — a dump that needs longer is
+    wedged, not slow (a healthy dump takes 1-3 s; the re-probe #2
+    run burned ~41 s per dump() call at 3 attempts x 60 s). The
+    rm/pull calls are capped too, so one dump() call can never
+    cost more than ~2 x (10 + 20 + 20 + 2) s."""
     path = f"ui_{name}.xml"
-    for _ in range(3):
+    for _ in range(DUMP_ATTEMPTS):
         if os.path.exists(path):
             os.remove(path)
-        shell("rm", "/sdcard/ui.xml")
-        shell("uiautomator", "dump", "/sdcard/ui.xml")
-        out, _, _ = adb("pull", "/sdcard/ui.xml", path)
+        shell("rm", "/sdcard/ui.xml", timeout=10)
+        shell("uiautomator", "dump", "/sdcard/ui.xml",
+              timeout=DUMP_SHELL_TIMEOUT)
+        out, _, _ = adb("pull", "/sdcard/ui.xml", path, timeout=20)
         if os.path.exists(path) and os.path.getsize(path) > 100:
             try:
                 ET.parse(path)
@@ -480,6 +516,12 @@ def exit_viewer(tag, screen="REEL_VIEWER"):
     nodes = []
     state = None
     for attempt in (1, 2, 3):
+        # Fix #5: never start another BACK attempt in the last
+        # minute — return the TIMEOUT pseudo-state so the caller
+        # finishes with the deadline verdict instead of STUCK.
+        if past_deadline(DEADLINE_MARGIN_SEC):
+            log("deadline reached during viewer recovery; stopping")
+            return "TIMEOUT", nodes
         nodes = parse_dump(dump(f"{tag}b{attempt}"))
         state = classify(nodes)
         if state == "FEED":
@@ -576,13 +618,24 @@ def exit_onboarding_location(nodes, tag):
     died on UNKNOWN_SCREEN at step 4. The screen has no Skip /
     Not now affordance; its only clickable node is "Continue"
     (which triggers the Android location-permission dialog).
-    Recovery order, max 2 attempts:
+    Recovery order:
       (a) BACK key first — it may skip the onboarding WITHOUT
           granting location. Verified with a fresh dump.
+      Fix #5: BACK is retried up to 3 times. In the 1.19 re-probe
+          #2 the first BACK produced no dump and the handler gave
+          up — the driver then spun 24 min in the main loop's
+          unbounded dump-failure retry. Each retry is followed by
+          a fresh dump, and the "BACK left the app" relaunch check
+          runs after EVERY attempt's dump: a BACK that silently
+          cleared the onboarding while dumps were failing must not
+          be followed by another blind BACK on the feed — if the
+          dump shows the launcher, relaunch instead.
       (b) If still on the onboarding, tap "Continue" and DENY the
           system location dialog ("Don't allow", verified — never
-          "While using the app" / "Only this time"). Verified with
-          a fresh dump.
+          "While using the app" / "Only this time"). Only with a
+          FRESH dump in hand: with no fresh hierarchy there is no
+          Continue button to find, and the main loop's dump-failure
+          escalation (relaunch) takes over instead of giving up.
     If BACK leaves the app entirely (launcher), the relaunch is
     gated on a SUCCEEDED dump showing the app is gone — the same
     rule as the tap loop — never a blind relaunch. BACK is never
@@ -590,15 +643,30 @@ def exit_onboarding_location(nodes, tag):
     current screen IS the onboarding, and every press is verified
     by a fresh dump before the next one.
     Returns (state, nodes): the fresh classified state after
-    recovery, or ("ONBOARDING_LOCATION", nodes) if still stuck.
+    recovery, ("ONBOARDING_LOCATION", nodes) if still stuck, or
+    ("TIMEOUT", nodes) if the deadline was reached.
     A success is recorded in status.json (onboarding_recoveries)."""
     state = "ONBOARDING_LOCATION"
-    # Attempt 1: BACK — skip without granting location.
-    log("location onboarding; BACK key first (attempt 1/2)")
-    keyevent(4)
-    time.sleep(3)
-    nodes = parse_dump(dump(f"{tag}b1"))
-    if nodes:
+    # BACK phase: up to 3 attempts, each verified by a fresh dump.
+    for attempt in (1, 2, 3):
+        if past_deadline(DEADLINE_MARGIN_SEC):
+            log("deadline reached during onboarding BACK retries")
+            return "TIMEOUT", nodes
+        log(f"location onboarding; BACK key (attempt {attempt}/3)")
+        keyevent(4)
+        time.sleep(3)
+        nodes = parse_dump(dump(f"{tag}b{attempt}"))
+        if not nodes:
+            # No fresh hierarchy after BACK: the screen is unknown
+            # — it may have advanced to the feed while uiautomator
+            # was wedged. Retry BACK (a BACK on the onboarding is
+            # the documented recovery); if the dump after the next
+            # BACK shows the launcher, the relaunch check below
+            # brings the app back. Never tap Continue blindly: with
+            # no dump there is no button to find.
+            log(f"no UI dump after BACK on onboarding "
+                f"(attempt {attempt}/3)")
+            continue
         state = classify(nodes)
         if state != "ONBOARDING_LOCATION" and not app_foreground(nodes):
             # BACK left the app (launcher): relaunch once, gated on
@@ -612,30 +680,34 @@ def exit_onboarding_location(nodes, tag):
         if state != "ONBOARDING_LOCATION":
             STATUS.setdefault("onboarding_recoveries", []).append(
                 {"screen": "ONBOARDING_LOCATION", "tag": tag,
-                 "method": "back", "attempts": 1})
+                 "method": "back", "attempts": attempt})
             save_status()
             log(f"onboarding cleared by BACK; now on {state}")
             return state, nodes
-    else:
-        # No fresh hierarchy after BACK: wait and re-dump once
-        # instead of acting blindly.
-        log("no UI dump after BACK on onboarding; waiting and "
-            "re-dumping once")
-        time.sleep(3)
-        nodes = parse_dump(dump(f"{tag}b1r"))
-        if nodes:
-            state = classify(nodes)
-            if state != "ONBOARDING_LOCATION":
-                STATUS.setdefault("onboarding_recoveries", []).append(
-                    {"screen": "ONBOARDING_LOCATION", "tag": tag,
-                     "method": "back", "attempts": 1})
-                save_status()
-                log(f"onboarding cleared by BACK; now on {state}")
-                return state, nodes
-    # Attempt 2: Continue, then DENY the system location dialog.
-    log("onboarding still up after BACK; tapping Continue "
-        "(attempt 2/2)")
-    btn = find_exact(nodes, "Continue") if nodes else None
+        log(f"onboarding still up after BACK attempt {attempt}/3")
+    # BACK phase exhausted: only try Continue with a FRESH dump in
+    # hand. One more dump attempt first — the hierarchy may have
+    # recovered while the BACKs were settling.
+    if past_deadline(DEADLINE_MARGIN_SEC):
+        log("deadline reached before onboarding Continue")
+        return "TIMEOUT", nodes
+    nodes = parse_dump(dump(f"{tag}c0"))
+    if not nodes:
+        log("onboarding still up but no UI dump after 3 BACK "
+            "attempts; returning for the main loop's dump-failure "
+            "escalation (relaunch)")
+        return "ONBOARDING_LOCATION", nodes
+    state = classify(nodes)
+    if state != "ONBOARDING_LOCATION":
+        STATUS.setdefault("onboarding_recoveries", []).append(
+            {"screen": "ONBOARDING_LOCATION", "tag": tag,
+             "method": "back", "attempts": 3})
+        save_status()
+        log(f"onboarding cleared by BACK; now on {state}")
+        return state, nodes
+    # Continue, then DENY the system location dialog.
+    log("onboarding still up after BACK; tapping Continue")
+    btn = find_exact(nodes, "Continue")
     if not btn:
         log("onboarding has no Continue button; giving up")
         return "ONBOARDING_LOCATION", nodes
@@ -654,7 +726,7 @@ def exit_onboarding_location(nodes, tag):
         STATUS.setdefault("onboarding_recoveries", []).append(
             {"screen": "ONBOARDING_LOCATION", "tag": tag,
              "method": "continue+deny" if saw_perm else "continue",
-             "attempts": 2})
+             "attempts": 4})
         save_status()
         log(f"onboarding cleared by Continue + deny; now on {state}")
         return state, nodes
@@ -989,6 +1061,13 @@ def tap_sequence_tab(i, name, desc):
     (futile: relaunch just brings the same Reels task forward)."""
     global LAST_TAP_NAME
     tap_started = time.time()
+    # Fix #5: never start a tap in the last minute — the FEED branch
+    # finishes TIMEOUT before the next tap instead of running past
+    # the deadline (the 1.19 re-probe #2 died this way).
+    if past_deadline(DEADLINE_MARGIN_SEC):
+        log(f"deadline reached before tap {i}/8 ({name}); stopping "
+            f"the sequence")
+        return [], False
     # The tab tapped by the PREVIOUS sequence tap: the dump-failure
     # BACK below is only safe when it was Reels (BACK from the Reels
     # tab returns to the feed; BACK on the home feed exits the app).
@@ -1002,6 +1081,11 @@ def tap_sequence_tab(i, name, desc):
     if not tab and nodes_cur:
         # Dumps work but the tab is not there yet: bar settling.
         # Time-boxed — each re-dump is cheap while dumps succeed.
+        # Fix #5: stop before the re-dump loop in the last minute.
+        if past_deadline(DEADLINE_MARGIN_SEC):
+            log(f"deadline reached during tap {i}/8 ({name}); "
+                f"stopping the sequence")
+            return [], False
         for retry in range(2):
             if time.time() - tap_started > 45:
                 break
@@ -1019,6 +1103,11 @@ def tap_sequence_tab(i, name, desc):
         # cover the tab bar DURING the loop — the 1.14 probe's tabs
         # 4-8 died on it — so the main loop's tap_skip never sees it.
         # Dismiss it here and retry the tab once.
+        # Fix #5: stop before the sheet dismissal in the last minute.
+        if past_deadline(DEADLINE_MARGIN_SEC):
+            log(f"deadline reached during tap {i}/8 ({name}); "
+                f"stopping the sequence")
+            return [], False
         fresh = dismiss_sheet(nodes_cur, f"step_tab{i:02d}sheet")
         if fresh is not None:
             nodes_cur = fresh
@@ -1026,6 +1115,11 @@ def tap_sequence_tab(i, name, desc):
             tab = find_tab(nodes_cur, desc)
     if not tab and not nodes_cur:
         # --- dump-failure path (re-probe 3) ---
+        # Fix #5: stop before the fallback tap in the last minute.
+        if past_deadline(DEADLINE_MARGIN_SEC):
+            log(f"deadline reached during tap {i}/8 ({name}); "
+                f"stopping the sequence")
+            return [], False
         if desc in LAST_TABS and time.time() - tap_started < 90:
             cx, cy = LAST_TABS[desc]
             log(f"tab {name} not found and UI dumps keep failing "
@@ -1101,6 +1195,12 @@ def tap_sequence_tab(i, name, desc):
             f"as-is")
         STATUS.setdefault("tab_failures", []).append(name)
         save_status()
+    # Fix #5: stop before the after-dump in the last minute — the
+    # verdict matters more than the shot.
+    if past_deadline(DEADLINE_MARGIN_SEC):
+        log(f"deadline reached during tap {i}/8 ({name}); skipping "
+            f"the after-dump")
+        return [], False
     nodes_after = parse_dump(dump(f"step_tab{i:02d}after"))
     if nodes_after:
         remember_tabs(nodes_after)
@@ -1380,6 +1480,14 @@ def run_transition_test():
     string."""
     result = "TRANSITION_SKIPPED"
     info = {"result": result, "shots": [], "guard_firings": 0}
+    # Fix #5: never start the bursts in the last minute — the FEED
+    # branch finishes TIMEOUT on this result instead of running
+    # past the deadline.
+    if past_deadline(DEADLINE_MARGIN_SEC):
+        log("deadline reached before transition test; skipping")
+        info["result"] = "TRANSITION_TIMEOUT"
+        STATUS["transition_test"] = info
+        return "TRANSITION_TIMEOUT"
     try:
         # Guard firings BEFORE the switches, so the count below is
         # the delta during the transitions (not everything since
@@ -1515,6 +1623,13 @@ def run_drag_test():
     a switch is claimed only from a dump showing Reels selected /
     viewer text, or from an after-shot showing the Reels viewer."""
     drag_result = "DRAG_SKIPPED"
+    # Fix #5: never start the swipe in the last minute — the FEED
+    # branch finishes TIMEOUT on this result instead of running
+    # past the deadline.
+    if past_deadline(DEADLINE_MARGIN_SEC):
+        log("deadline reached before drag test; skipping")
+        STATUS["drag_test"] = {"result": "DRAG_TIMEOUT"}
+        return "DRAG_TIMEOUT"
     try:
         nodes_drag = parse_dump(dump("step_drag0"))
         if nodes_drag:
@@ -1588,11 +1703,16 @@ def run_drag_test():
                 # The after-dump failed (reels SurfaceView): wait
                 # for the SurfaceView to settle and re-dump ONCE
                 # before giving up on the dump path.
-                log("drag test: after-dump failed; waiting 5s and "
-                    "re-dumping once (SurfaceView may settle)")
-                time.sleep(5)
-                nodes_drag_after = parse_dump(dump("step_drag_after2"))
-                late_dump = nodes_drag_after is not None
+                # Fix #5: skip the late re-dump in the last minute.
+                if past_deadline(DEADLINE_MARGIN_SEC):
+                    log("drag test: deadline reached; skipping the "
+                        "late re-dump")
+                else:
+                    log("drag test: after-dump failed; waiting 5s and "
+                        "re-dumping once (SurfaceView may settle)")
+                    time.sleep(5)
+                    nodes_drag_after = parse_dump(dump("step_drag_after2"))
+                    late_dump = nodes_drag_after is not None
             drag_info = {
                 "from": list(home_tab["center"]),
                 "to": list(reels_tab["center"]),
@@ -1671,6 +1791,12 @@ def finish(status, detail=""):
     STATUS["status"] = status
     STATUS["detail"] = detail
     STATUS["cold_start_total_ms"] = cold_start_ms()
+    # Fix #5: write the verdict FIRST. The logcat capture below can
+    # take up to 90 s, and the workflow's step timeout can kill the
+    # process mid-capture — before this fix status.json was only
+    # written after the capture, so a kill left it STARTED with no
+    # verdict (exactly what happened in the 1.19 re-probe #2).
+    save_status()
     count, out = logcat_fatal_count()
     STATUS["fatal_count"] = max(count, STATUS["fatal_count"])
     with open("logcat-final.txt", "w", encoding="utf-8") as fh:
@@ -1697,6 +1823,10 @@ def main():
     last_state = None
     same_state_runs = 0
     kb_hidden_for = None  # state for which the keyboard was already hidden
+    # Fix #5: consecutive failed dumps, and whether the one
+    # escalation (relaunch) has already been spent for this run.
+    dump_fail_runs = 0
+    dump_escalated = False
 
     for step in range(1, 61):
         STATUS["steps"] = step
@@ -1705,14 +1835,60 @@ def main():
         path = dump(f"step{step:02d}")
         nodes = parse_dump(path)
         if path is None:
-            # dump() failed 3x (e.g. the UI never goes idle while a
+            # dump() failed (e.g. the UI never goes idle while a
             # video plays): there is NO fresh hierarchy, so act on
-            # nothing — wait and retry this step instead of tapping
-            # blindly at coordinates from an old screen.
-            log("UI dump failed (no fresh hierarchy); waiting 3s "
-                "and retrying this step without acting")
-            time.sleep(3)
-            continue
+            # nothing.
+            # Fix #5: the old code retried this step forever — in
+            # the 1.19 re-probe #2 it spun 34 times (~41 s each)
+            # without ever classifying, so the same-state guard
+            # never fired. Now the failures are counted: at
+            # DUMP_FAIL_ESCALATE_AT the app is relaunched once to
+            # unstick uiautomator, and at DUMP_FAIL_MAX the driver
+            # finishes DUMP_STUCK with a verdict instead of dying
+            # on the step timeout.
+            dump_fail_runs += 1
+            if dump_fail_runs >= DUMP_FAIL_MAX:
+                if not past_deadline(DEADLINE_MARGIN_SEC):
+                    screenshot("shot_dump_stuck")
+                return finish("DUMP_STUCK",
+                              f"UI dump failed {dump_fail_runs} times "
+                              f"in a row (last screen {last_state}); "
+                              f"uiautomator never returned a fresh "
+                              f"hierarchy")
+            if (dump_fail_runs == DUMP_FAIL_ESCALATE_AT
+                    and not dump_escalated):
+                # One escalation per failure-run: relaunch the app
+                # to unstick uiautomator. BACK is NOT used here:
+                # with no fresh hierarchy the screen is unknown —
+                # the last known screen may already have advanced
+                # to the feed, where BACK would exit the app.
+                # Relaunch is state-independent.
+                dump_escalated = True
+                log(f"UI dump failed {dump_fail_runs} times in a "
+                    f"row; relaunching the app once to unstick "
+                    f"uiautomator (last screen {last_state})")
+                relaunch()
+                time.sleep(5)
+                path = dump(f"step{step:02d}esc")
+                nodes = parse_dump(path)
+                if path is not None:
+                    dump_fail_runs = 0
+                    dump_escalated = False
+                    # Fall through to classification with the
+                    # fresh nodes.
+                else:
+                    log("relaunch did not restore UI dumps; "
+                        "waiting and retrying the step")
+                    time.sleep(3)
+                    continue
+            else:
+                log("UI dump failed (no fresh hierarchy); waiting "
+                    "3s and retrying this step without acting")
+                time.sleep(3)
+                continue
+        else:
+            dump_fail_runs = 0
+            dump_escalated = False
         state = classify(nodes)
         # A focused field means the soft keyboard is up and covers the
         # lower buttons: hide it once per screen visit before any button
@@ -1755,6 +1931,10 @@ def main():
                                        "REEL_VIEWER")
             if rec_state == "FEED":
                 continue
+            if rec_state == "TIMEOUT":
+                return finish("TIMEOUT",
+                              "driver deadline reached during "
+                              "reel-viewer recovery")
             screenshot("shot_stuck_reel")
             return finish("STUCK_REEL_VIEWER",
                           "full-screen reel viewer did not return to "
@@ -1781,22 +1961,56 @@ def main():
                 ("direct", "Message"), ("home", "Home"),
             ]
             for i, (name, desc) in enumerate(sequence, 1):
+                # Fix #5: never start another tap in the last
+                # minute — the 1.19 re-probe #2 ran the taps past
+                # the deadline and died on the step timeout.
+                if past_deadline(DEADLINE_MARGIN_SEC):
+                    return finish("TIMEOUT",
+                                  "driver deadline reached during "
+                                  "8-tap sequence "
+                                  f"(before tap {i}/8: {name})")
                 _, crashed = tap_sequence_tab(i, name, desc)
                 if crashed:
                     return finish("CRASHED_AFTER_FEED",
                                   f"process died during tab sequence "
                                   f"(tap {i}/8: {name})")
+            if past_deadline(DEADLINE_MARGIN_SEC):
+                return finish("TIMEOUT",
+                              "driver deadline reached during 8-tap "
+                              "sequence (after the taps)")
             if not check_alive("8-tap tab sequence"):
                 return finish("CRASHED_AFTER_FEED",
                               "FATAL or dead process after tab sequence")
             # 1.19 capsule-flash acceptance test (see
             # run_transition_test): Home -> Reels -> Home bursts.
+            if past_deadline(DEADLINE_MARGIN_SEC):
+                return finish("TIMEOUT",
+                              "driver deadline reached before "
+                              "transition test")
             trans_result = run_transition_test()
+            if trans_result == "TRANSITION_TIMEOUT":
+                return finish("TIMEOUT",
+                              "driver deadline reached during "
+                              "transition test")
+            if past_deadline(DEADLINE_MARGIN_SEC):
+                return finish("TIMEOUT",
+                              "driver deadline reached during "
+                              "transition test (after the bursts)")
             if not check_alive("transition test"):
                 return finish("CRASHED_AFTER_FEED",
                               "FATAL or dead process after transition test")
             # 1.13 drag-lens acceptance test (see run_drag_test).
+            if past_deadline(DEADLINE_MARGIN_SEC):
+                return finish("TIMEOUT",
+                              "driver deadline reached before drag test")
             drag_result = run_drag_test()
+            if drag_result == "DRAG_TIMEOUT":
+                return finish("TIMEOUT",
+                              "driver deadline reached during drag test")
+            if past_deadline(DEADLINE_MARGIN_SEC):
+                return finish("TIMEOUT",
+                              "driver deadline reached during drag test "
+                              "(after the swipe)")
             return finish("LOGGED_IN_FEED", "home feed + 8-tap sequence "
                           "captured (home/reels/direct/profile x2); "
                           f"transition test: {trans_result}; "
@@ -2052,6 +2266,10 @@ def main():
                                            "PHOTO_VIEWER")
                 if rec_state == "FEED":
                     continue
+                if rec_state == "TIMEOUT":
+                    return finish("TIMEOUT",
+                                  "driver deadline reached during "
+                                  "viewer recovery")
                 screenshot(f"shot_stuck_{state.lower()}")
                 return finish("STUCK_REEL_VIEWER",
                               "full-screen viewer (seen as PHOTO) did "
