@@ -94,6 +94,25 @@ import java.util.WeakHashMap
  * apply() runs on every debounced sweep (TabBarHook.sweep), so
  * anything Instagram resets is re-asserted within ~400 ms.
  *
+ * 1.19 (on top of the proven-clean 1.18) — Hossein's phone verdict:
+ *  - headers/toolbars collided with the status icons (feed "For you",
+ *    reels "For you / Friends", profile "hosinrdxpro", direct inbox):
+ *    the panel moved up but the chrome stayed at y=0. insetTopChrome
+ *    pushes every top bar down by exactly the status-bar height and
+ *    shifts the content below it by the same amount; the media itself
+ *    stays full-bleed from y=0 and still scrolls under the bars.
+ *  - the reels caption (clips_media_info_component) and the action
+ *    rail (clips_ufi_component) ended 30 px INSIDE the capsule zone;
+ *    raiseReelChrome lifts them so their bottoms sit 8dp above the
+ *    capsule top, measured live against the bar's real position.
+ *  - a thin white line survived at the very bottom: the feed ended at
+ *    y=1184 and the window background (white) showed through the
+ *    transparent nav bar. The coordinator is grown to the true bottom
+ *    (1280) and the window/decor background is set black, so the
+ *    strip is feed content — or black, never white.
+ *  - the top scrim is now a smoother 5-stop fade ending just below
+ *    the status icons (statusBarHeight + 12dp), still very light.
+ *
  * Conservative by design: every step is null-checked and wrapped in
  * its own try/catch, so a missing view (or a view Instagram rebuilt
  * mid-swipe) can never crash the app — that step is skipped and the
@@ -107,6 +126,11 @@ object FullScreenHook {
 
     // View tag (module-local key) for the top scrim, stored on the decor view.
     private const val TAG_TOP_SCRIM = 0x7e1e0311
+    // 1.19: set on the decor once the black window background is
+    // applied — apply() runs on every sweep, and re-setting the
+    // window background every ~400 ms would invalidate the whole
+    // window each time (visible churn on a smooth feed).
+    private const val TAG_BLACK_BG = 0x7e1e0312
 
     // Decors already given the window flags (weak keys: a dead decor drops out).
     private val flaggedDecors: MutableSet<View> =
@@ -137,6 +161,43 @@ object FullScreenHook {
     private val escalationCapped: MutableSet<View> =
         Collections.newSetFromMap(WeakHashMap<View, Boolean>())
 
+    // 1.19: the bottom inset the coordinator loses to the system nav
+    // bar (parent height − coordinator height, 96 px on the 720x1280
+    // probe). Measured ONCE, before the coordinator is grown, and
+    // kept sticky: after growth the difference reads 0. TabBarHook
+    // adds it to the bar's bottom margin so the capsule does not
+    // slide down when the coordinator grows to the true bottom.
+    // Written on the main thread (sweep); read on the same thread.
+    @Volatile
+    var bottomInsetPx: Int = 0
+
+    // 1.19: chrome shifts (headers + the content below them).
+    // ChromeShift.mode: 0 = top margin (preferred — composes with
+    // Instagram's own translationY hide/show animations instead of
+    // fighting them), 1 = translationY fallback (used only when the
+    // next sweep measures that the margin did not move the view —
+    // some parents position children without honouring margins).
+    // origLayoutTop is the window top the view had before any shift
+    // (0 for a header, the header's height for the content below it);
+    // sweepsSeen counts maintain passes so a margin gets one full
+    // layout cycle to prove itself before the mode switches.
+    private class ChromeShift(
+        var origMargin: Int,
+        var mode: Int,
+        val targetTop: Int,
+        var origLayoutTop: Int,
+        val isHeader: Boolean,
+        var sweepsSeen: Int = 0
+    )
+
+    private val chromeShifts: MutableMap<View, ChromeShift> =
+        Collections.synchronizedMap(WeakHashMap<View, ChromeShift>())
+
+    // 1.19: original top padding of the feed list (android:id/list),
+    // so the header inset below is applied exactly once.
+    private val savedListTopPadding: MutableMap<View, Int> =
+        Collections.synchronizedMap(WeakHashMap<View, Int>())
+
     /** Apply the full-screen treatment to this activity. Idempotent; safe to call often. */
     fun apply(a: Activity?) {
         if (a == null) return
@@ -161,6 +222,27 @@ object FullScreenHook {
         } catch (ignored: Throwable) {
         }
         try {
+            // 1.19: the window background is what shows wherever no
+            // content reaches (the 96 px strip below the feed in
+            // 1.18, pure white in the probe screenshots). Black, so
+            // any such sliver reads as empty dark space, never a
+            // white line. The decor and the content view get the same
+            // treatment — one of them is the layer the strip shows.
+            // Once only per decor (guarded by a tag): apply() runs on
+            // every sweep and re-setting these every ~400 ms would
+            // invalidate the whole window each time.
+            val decorForBg = window.decorView
+            if (decorForBg != null && decorForBg.getTag(TAG_BLACK_BG) == null) {
+                val black = android.graphics.drawable.ColorDrawable(Color.BLACK)
+                window.setBackgroundDrawable(black)
+                decorForBg.setBackgroundColor(Color.BLACK)
+                val content = a.findViewById<View>(android.R.id.content)
+                if (content != null) content.setBackgroundColor(Color.BLACK)
+                decorForBg.setTag(TAG_BLACK_BG, true)
+            }
+        } catch (ignored: Throwable) {
+        }
+        try {
             val decor = window.decorView ?: return
             // OR the layout flags in — never overwrite what Instagram set
             // (light/dark icon flags stay exactly as it chose them, so the
@@ -182,22 +264,27 @@ object FullScreenHook {
     /**
      * The very light top veil: a non-touchable gradient laid over the
      * content at the top of the decor (drawn above the feed/header, below
-     * the system status icons, which live in their own window). Black
-     * ~15% at the very top fading to transparent — barely there, only
-     * enough to keep the status icons readable over a bright photo.
+     * the system status icons, which live in their own window). 1.19:
+     * five stops instead of three, so the fade is smoother, and it ends
+     * just below the status icons (status-bar height + 12dp) — only
+     * under the icons, nowhere else. Black ~19% at the very top fading
+     * to transparent — barely there, only enough to keep the status
+     * icons readable over a bright photo.
      * This is a scrim, NOT a blur — see the class doc.
      */
     private fun attachTopScrim(a: Activity) {
         val decor = a.window?.decorView as? ViewGroup ?: return
         val existing = decor.getTag(TAG_TOP_SCRIM) as? View
         if (existing != null && existing.parent === decor) return
-        val scrimHeight = statusBarHeight(a) + dp(a, 16)
+        val scrimHeight = statusBarHeight(a) + dp(a, 12)
         val scrim = View(a)
         val gradient = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
             intArrayOf(
-                Color.argb(38, 0, 0, 0), // ~15% black at the very top
-                Color.argb(20, 0, 0, 0), // ~8% mid-way
+                Color.argb(48, 0, 0, 0), // ~19% black at the very top
+                Color.argb(30, 0, 0, 0), // ~12%
+                Color.argb(16, 0, 0, 0), // ~6%
+                Color.argb(6, 0, 0, 0), // ~2%
                 Color.argb(0, 0, 0, 0) // transparent at the bottom edge
             )
         )
@@ -242,7 +329,26 @@ object FullScreenHook {
         } catch (ignored: Throwable) {
         }
         try {
+            // 1.19: grow the coordinator to the true bottom FIRST —
+            // the panel/wrapper/pager chain can only grow into a
+            // parent that is already tall.
+            growCoordinator(a, root, pkg)
+        } catch (ignored: Throwable) {
+        }
+        try {
             growFeed(a, root, pkg)
+        } catch (ignored: Throwable) {
+        }
+        try {
+            // 1.19: push the top bars below the status icons and
+            // shift the content below them by the same amount.
+            insetTopChrome(a, root, pkg)
+        } catch (ignored: Throwable) {
+        }
+        try {
+            // 1.19: lift the reels caption + action rail above the
+            // capsule (measured live against the bar's real top).
+            raiseReelChrome(a, root, pkg)
         } catch (ignored: Throwable) {
         }
         try {
@@ -387,6 +493,362 @@ object FullScreenHook {
                 )
             }
         } catch (ignored: Throwable) {
+        }
+    }
+
+    /**
+     * 1.19: grow the coordinator to the true bottom. The coordinator
+     * (layout_container_center_right_coordinator_layout) is 1184 tall
+     * on a 1280 screen — the bottom 96 px is the system nav-bar
+     * inset, and every view below it (panel, wrapper, pager, feed)
+     * is capped by it. The bottom inset is recorded BEFORE growing
+     * (sticky — after growth the difference reads 0) so TabBarHook
+     * can hold the capsule where it is.
+     */
+    private fun growCoordinator(a: Activity, root: ViewGroup, pkg: String) {
+        val coordinator = findByName(
+            root, a, "layout_container_center_right_coordinator_layout", pkg
+        ) ?: return
+        val parent = coordinator.parent as? ViewGroup ?: return
+        try {
+            if (bottomInsetPx == 0 && parent.height > coordinator.height &&
+                coordinator.height > 0
+            ) {
+                bottomInsetPx = parent.height - coordinator.height
+                RdxLog.d("fullscreen bottom inset measured: " + bottomInsetPx + "px")
+            }
+        } catch (ignored: Throwable) {
+        }
+        try {
+            if (fitsCleared.add(coordinator)) coordinator.fitsSystemWindows = false
+        } catch (ignored: Throwable) {
+        }
+        growViewToParent(coordinator, parent)
+    }
+
+    /**
+     * 1.19: push every top bar below the status icons and shift the
+     * content below it by the same amount. The media itself stays
+     * full-bleed from y=0 — only the chrome moves.
+     *
+     * A "top bar" is found structurally (not by name, so future
+     * screens get the same treatment): window-top == 0, height
+     * 40–100dp, width >= 90% of the screen, not an ancestor of the
+     * feed list (never descend into android:id/list — the gap spacer,
+     * the stories tray and the posts all sit at the top too but are
+     * content, not chrome), and not the panel/wrapper/pager itself
+     * (their heights rule them out). The outermost match wins: once
+     * a bar is found its children are not walked (they move with it).
+     * Known bars are maintained by identity (their window top is the
+     * shift once applied, so the discovery walk would no longer see
+     * them at y=0).
+     */
+    private fun insetTopChrome(a: Activity, root: ViewGroup, pkg: String) {
+        val panel = findByName(root, a, "layout_container_main_panel", pkg) ?: return
+        val shift = statusBarHeight(a)
+        if (shift <= 0) return
+        val screenW = a.resources.displayMetrics.widthPixels
+        val list = findByNameInPackage(root, a, "list", "android")
+        // 1. Maintain the chrome already shifted (by identity).
+        try {
+            val entries = ArrayList(chromeShifts.entries)
+            for ((view, state) in entries) {
+                if (!view.isAttachedToWindow) {
+                    chromeShifts.remove(view)
+                    continue
+                }
+                convergeChrome(view, state)
+            }
+        } catch (ignored: Throwable) {
+        }
+        // 2. Discover new top bars (still at y=0).
+        val bars = ArrayList<View>()
+        try {
+            collectTopBars(a, panel, list, screenW, bars)
+        } catch (ignored: Throwable) {
+        }
+        for (bar in bars) {
+            if (chromeShifts.containsKey(bar)) continue
+            discoverChrome(bar, shift, isHeader = true)
+        }
+        // 3. For every known header, find the content below it (or
+        // the feed list) and shift that too.
+        try {
+            val headers = ArrayList<View>()
+            for ((view, state) in chromeShifts) {
+                if (state.isHeader) headers.add(view)
+            }
+            for (header in headers) {
+                val headerBottom = header.height // original bottom (top was 0)
+                if (headerBottom <= 0) continue
+                val content = findContentBelow(
+                    a, panel, list, screenW, header, headerBottom
+                )
+                if (content != null) {
+                    if (!chromeShifts.containsKey(content)) {
+                        discoverChrome(content, headerBottom + shift, isHeader = false)
+                    }
+                } else if (isFeedHeader(header, a, pkg)) {
+                    shiftFeedListTop(a, root, pkg, shift)
+                }
+            }
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /** Record a newly found chrome view and apply its first shift. */
+    private fun discoverChrome(v: View, targetTop: Int, isHeader: Boolean) {
+        try {
+            val lp = v.layoutParams as? ViewGroup.MarginLayoutParams
+            val origMargin = lp?.topMargin ?: 0
+            val origTop = windowTop(v)
+            val state = ChromeShift(origMargin, 0, targetTop, origTop, isHeader)
+            chromeShifts[v] = state
+            if (lp != null) {
+                val want = origMargin + (targetTop - origTop)
+                if (lp.topMargin != want) {
+                    lp.topMargin = want
+                    v.layoutParams = lp
+                }
+                RdxLog.d(
+                    "chrome " + describe(v) + " topMargin " + origMargin +
+                        " -> " + want + " (targetTop " + targetTop + ")"
+                )
+            } else {
+                // No margin params on this parent: straight to
+                // translation (the only mechanism left).
+                state.mode = 1
+                v.translationY = (targetTop - origTop).toFloat()
+                RdxLog.d(
+                    "chrome " + describe(v) +
+                        " no MarginLayoutParams; translationY " + v.translationY
+                )
+            }
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /** Keep one shifted chrome view on its target top. */
+    private fun convergeChrome(v: View, state: ChromeShift) {
+        try {
+            state.sweepsSeen++
+            if (state.mode == 0) {
+                // Layout top, not window top: Instagram's own
+                // translationY (hide-on-scroll) must not be mistaken
+                // for a margin that did not work.
+                val layoutTop = (windowTop(v) - v.translationY).toInt()
+                if (Math.abs(layoutTop - state.targetTop) <= 1) return
+                if (state.sweepsSeen >= 2) {
+                    // One full layout cycle has run with the margin
+                    // set and the view still has not moved: this
+                    // parent does not honour top margins. Revert it
+                    // and hold the view with translation instead.
+                    val lp = v.layoutParams as? ViewGroup.MarginLayoutParams
+                    if (lp != null && lp.topMargin != state.origMargin) {
+                        lp.topMargin = state.origMargin
+                        v.layoutParams = lp
+                    }
+                    state.mode = 1
+                    v.translationY = (state.targetTop - layoutTop).toFloat()
+                    RdxLog.d(
+                        "chrome " + describe(v) +
+                            " top margin ignored; using translationY " +
+                            v.translationY
+                    )
+                } else {
+                    // Re-assert the margin (Instagram may have reset
+                    // it); the next sweep decides whether it sticks.
+                    val lp = v.layoutParams as? ViewGroup.MarginLayoutParams
+                    if (lp != null) {
+                        val want = state.origMargin +
+                            (state.targetTop - state.origLayoutTop)
+                        if (lp.topMargin != want) {
+                            lp.topMargin = want
+                            v.layoutParams = lp
+                        }
+                    }
+                }
+            } else {
+                val top = windowTop(v)
+                val diff = state.targetTop - top
+                if (Math.abs(diff) > 1) {
+                    v.translationY = v.translationY + diff.toFloat()
+                }
+            }
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /** Pre-order walk of the panel subtree for unshifted top bars. */
+    private fun collectTopBars(
+        a: Activity, panel: ViewGroup, list: View?, screenW: Int, out: MutableList<View>
+    ) {
+        val minH = dp(a, 40)
+        val maxH = dp(a, 100)
+        val minW = (screenW * 0.9f).toInt()
+        val stack = ArrayDeque<View>()
+        stack.add(panel)
+        while (stack.isNotEmpty()) {
+            val v = stack.removeLast()
+            if (v !== panel) {
+                if (v.isAttachedToWindow) {
+                    val top = windowTop(v)
+                    val h = v.height
+                    val w = v.width
+                    if (top == 0 && h in minH..maxH && w >= minW) {
+                        out.add(v)
+                        continue // children move with the bar; do not descend
+                    }
+                }
+            }
+            val vg = v as? ViewGroup ?: continue
+            if (list != null && v === list) continue // never into the feed list
+            for (i in vg.childCount - 1 downTo 0) {
+                val child = vg.getChildAt(i) ?: continue
+                stack.add(child)
+            }
+        }
+    }
+
+    /**
+     * The outermost view below a header: window-top == the header's
+     * original bottom (±2 px), taller than 100dp, >= 90% of the screen
+     * wide, not inside the header and not inside the feed list.
+     * Pre-order, so the first match is the outermost (profile
+     * tab_appbar, direct list_container). Returns null when the
+     * header floats over background content (reels: the video).
+     */
+    private fun findContentBelow(
+        a: Activity, panel: ViewGroup, list: View?, screenW: Int,
+        header: View, headerBottom: Int
+    ): View? {
+        val minH = dp(a, 100)
+        val minW = (screenW * 0.9f).toInt()
+        val stack = ArrayDeque<View>()
+        stack.add(panel)
+        while (stack.isNotEmpty()) {
+            val v = stack.removeLast()
+            if (v !== panel && v !== header) {
+                if (v.isAttachedToWindow) {
+                    val top = windowTop(v)
+                    val h = v.height
+                    val w = v.width
+                    if (Math.abs(top - headerBottom) <= 2 && h > minH && w >= minW) {
+                        return v
+                    }
+                }
+            }
+            val vg = v as? ViewGroup ?: continue
+            if (v === header) continue
+            if (list != null && v === list) continue
+            for (i in vg.childCount - 1 downTo 0) {
+                val child = vg.getChildAt(i) ?: continue
+                stack.add(child)
+            }
+        }
+        return null
+    }
+
+    /** The feed header: its list is shifted by padding, not by margin. */
+    private fun isFeedHeader(bar: View, a: Activity, pkg: String): Boolean {
+        return try {
+            val res = a.resources
+            val id1 = res.getIdentifier("action_bar_LinearLayout", "id", pkg)
+            val id2 = res.getIdentifier("main_feed_action_bar", "id", pkg)
+            (id1 != 0 && bar.id == id1) || (id2 != 0 && bar.id == id2)
+        } catch (ignored: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Feed list top padding += the status-bar height, so the stories
+     * tray and the posts start below the shifted header. Padding —
+     * not a margin on the list container — so scrolled content still
+     * draws under the header and the status bar (clipToPadding is
+     * already false on this chain).
+     */
+    private fun shiftFeedListTop(a: Activity, root: ViewGroup, pkg: String, shift: Int) {
+        try {
+            val list = findByNameInPackage(root, a, "list", "android") ?: return
+            val orig = savedListTopPadding[list] ?: list.paddingTop.also {
+                savedListTopPadding[list] = it
+            }
+            val want = orig + shift
+            if (list.paddingTop != want) {
+                list.setPadding(
+                    list.paddingLeft, want, list.paddingRight, list.paddingBottom
+                )
+                RdxLog.d("chrome feed list paddingTop " + orig + " -> " + want)
+            }
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /**
+     * 1.19: lift the reels caption and action rail above the capsule.
+     * clips_media_info_component and clips_ufi_component both end at
+     * y=1102 on the probe — 30 px INSIDE the capsule zone (capsule
+     * top 1072). Their bottoms are raised to (bar top − 8dp), measured
+     * live against the bar's real position so the fix holds on any
+     * density. translationY: it works regardless of how the parent
+     * positions the view, and it is re-applied whenever Instagram's
+     * entrance animator resets it. Convergent both ways (a shorter
+     * caption eases back down, never below its base position).
+     */
+    private fun raiseReelChrome(a: Activity, root: ViewGroup, pkg: String) {
+        try {
+            val bar = findBarByTab(root, a) ?: return
+            val barLoc = IntArray(2)
+            bar.getLocationInWindow(barLoc)
+            val barTop = barLoc[1]
+            if (barTop <= 0) return
+            val desiredBottom = barTop - dp(a, 8)
+            for (name in arrayOf("clips_media_info_component", "clips_ufi_component")) {
+                val v = findByName(root, a, name, pkg) ?: continue
+                if (!v.isAttachedToWindow || v.height <= 0) continue
+                val loc = IntArray(2)
+                v.getLocationInWindow(loc)
+                val bottom = loc[1] + v.height
+                val diff = desiredBottom - bottom
+                if (diff < -1) {
+                    v.translationY = v.translationY + diff.toFloat()
+                    RdxLog.d(
+                        "fullscreen reel chrome " + name + " lifted by " +
+                            (-diff) + "px (bottom " + bottom + " -> " +
+                            desiredBottom + ")"
+                    )
+                } else if (diff > 8 && v.translationY < 0f) {
+                    // Shorter caption than the one that was lifted:
+                    // ease back down, never below the base position.
+                    val eased = Math.min(0f, v.translationY + diff.toFloat())
+                    if (eased != v.translationY) v.translationY = eased
+                }
+            }
+        } catch (ignored: Throwable) {
+        }
+    }
+
+    /** The tab bar: parent of feed_tab (same lookup as TabBarHook). */
+    private fun findBarByTab(root: ViewGroup, a: Activity): ViewGroup? {
+        return try {
+            val id = a.resources.getIdentifier("feed_tab", "id", a.packageName)
+            if (id == 0) return null
+            val tab = root.findViewById<View>(id) ?: return null
+            tab.parent as? ViewGroup
+        } catch (ignored: Throwable) {
+            null
+        }
+    }
+
+    /** Window top of a view (decor-relative y of its top edge). */
+    private fun windowTop(v: View): Int {
+        return try {
+            val loc = IntArray(2)
+            v.getLocationInWindow(loc)
+            loc[1]
+        } catch (ignored: Throwable) {
+            -1
         }
     }
 

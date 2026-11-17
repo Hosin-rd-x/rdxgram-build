@@ -70,6 +70,15 @@ import java.util.WeakHashMap
  * The 1.11 capsule fix (TAG_CAPSULE_DRAWABLE identity check) is intact
  * and still the only thing standing between the capsule and Instagram's
  * own tab-bar controller replacing its background with a flat colour.
+ * 1.19: the capsule flash on page switch. The global-layout
+ * listener below re-applies when it notices the background is not
+ * ours — but Instagram's bar controller can repaint the background
+ * with a bare setBackgroundColor + invalidate, which fires NO layout
+ * pass, so the flat frame stays until the next layout (or the next
+ * 400 ms sweep). The fix is a pre-draw guard (watchActivity): before
+ * every draw, if the bar is styled and its background is not the
+ * capsule, re-apply synchronously and cancel that draw — so no
+ * frame ever shows the flat background. See watchActivity.
  */
 object TabBarHook {
 
@@ -143,6 +152,15 @@ object TabBarHook {
         var dividerVisibility: Int = View.VISIBLE
     }
 
+    // 1.19: pre-draw guard state. The guard runs before every draw,
+    // so its fast path must be pointer-cheap (a WeakReference read, a
+    // set lookup, a tag read, one identity compare). lastBarSearchMs
+    // throttles the rebuilt-bar lookup (findBar walks the tree) to
+    // once per 100 ms, and only while a bar was styled before.
+    @Volatile
+    private var lastBarSearchMs: Long = 0
+    private var preDrawGuardLogged: Boolean = false
+
     /** Arm the hook for this activity. Called on every resume. */
     fun watchActivity(a: Activity?) {
         if (a == null) return
@@ -182,8 +200,65 @@ object TabBarHook {
                     sweep(a)
                 }, SWEEP_DEBOUNCE_MS)
             }
+            // 1.19: pre-draw guard — the capsule-flash fix. A layout
+            // pass is NOT the only way the flat background appears:
+            // Instagram's bar controller can repaint it with a bare
+            // setBackgroundColor + invalidate, which draws flat with
+            // no layout pass at all, so the listener above never
+            // fires. This guard runs before EVERY draw instead: if
+            // the bar is styled and its background is not our
+            // capsule, re-apply synchronously and cancel this draw —
+            // the next pass draws with the capsule, so no frame ever
+            // shows the flat background. The fast path is pointer
+            // reads only; the tree walk (a bar rebuilt by Instagram)
+            // runs at most once per 100 ms and only while a bar was
+            // styled before. Returning false is safe: after apply()
+            // the background IS the capsule, so the re-run draw
+            // passes the check and proceeds — it cannot loop.
+            decor.viewTreeObserver.addOnPreDrawListener {
+                try {
+                    guardPreDraw(a, decor)
+                } catch (ignored: Throwable) {
+                    true
+                }
+            }
         } catch (ignored: Throwable) {
         }
+    }
+
+    /**
+     * 1.19 pre-draw guard. Returns true to let the draw proceed,
+     * false to cancel it (the draw is re-run after the fix).
+     */
+    private fun guardPreDraw(a: Activity, decor: View): Boolean {
+        if (!Settings.isBarEnabled(a)) return true
+        val cached = cachedBar()
+        if (cached != null && activityOf(cached) == a && styledBars.contains(cached)) {
+            val appliedCapsule = cached.getTag(TAG_CAPSULE_DRAWABLE) as? Drawable
+            if (cached.background === appliedCapsule) return true
+            apply(cached)
+            if (!preDrawGuardLogged) {
+                preDrawGuardLogged = true
+                RdxLog.d("capsule re-applied in pre-draw (flat background caught before draw)")
+            } else {
+                RdxLog.d("capsule re-applied in pre-draw")
+            }
+            return false
+        }
+        // No cached bar: Instagram may have rebuilt it on the page
+        // switch (the old instance is detached). Look for the new one,
+        // throttled — a tree walk on every frame would cost more
+        // than the flash it prevents.
+        if (styledBars.isEmpty()) return true
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastBarSearchMs < 100L) return true
+        lastBarSearchMs = now
+        val root = decor as? ViewGroup ?: return true
+        val bar = findBar(a, root) ?: return true
+        cachedBarRef = WeakReference(bar)
+        apply(bar)
+        RdxLog.d("capsule re-applied in pre-draw (rebuilt bar found)")
+        return false
     }
 
     private fun cachedBar(): ViewGroup? {
@@ -348,13 +423,18 @@ object TabBarHook {
             // margins Instagram already gave the bar. Instagram runs edge-to-edge, so the
             // stock bottom margin can carry the system navigation inset — overwriting it
             // would drop the bar under the system buttons on 3-button navigation.
+            // 1.19: FullScreenHook grows the coordinator to the true bottom, which
+            // would carry a bottom-anchored bar down by the nav inset; the inset
+            // is added here so the capsule stays exactly where it was. If the
+            // bar is top-positioned instead, this extra bottom margin is inert.
             // setLayoutParams is only called when something actually changed, so styling
             // never spins a re-entrant layout loop.
             val lp = bar.layoutParams
             if (lp is ViewGroup.MarginLayoutParams) {
                 val left = saved.marginLeft + dp(bar, SIDE_MARGIN_DP)
                 val right = saved.marginRight + dp(bar, SIDE_MARGIN_DP)
-                val bottom = saved.marginBottom + dp(bar, BOTTOM_MARGIN_DP)
+                val bottom = saved.marginBottom + dp(bar, BOTTOM_MARGIN_DP) +
+                    FullScreenHook.bottomInsetPx
                 if (lp.leftMargin != left || lp.rightMargin != right || lp.bottomMargin != bottom) {
                     lp.leftMargin = left
                     lp.rightMargin = right

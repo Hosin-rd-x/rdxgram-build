@@ -189,6 +189,18 @@ DRAG_MID1_S = 0.48   # ~40% through the swipe
 DRAG_MID2_S = 0.84   # ~70% through the swipe (0.36 s after mid1)
 DRAG_AFTER_S = 3.48  # after-shot, same total as the old 0.48 + 3.0
 
+# Transition-burst test (1.19, capsule flash). A page switch takes
+# ~200-400 ms; a flat frame can last a single frame, so the burst is
+# 4 shots as fast as screencap allows (~0.12 s sleeps, each shot
+# costs another ~0.3-0.5 s adb round-trip). The burst alone can miss
+# a 1-frame flash — the primary evidence is the pre-draw guard's
+# logcat lines ("capsule re-applied in pre-draw", counted live after
+# the bursts); the burst shots catch a longer flash (guard broken
+# and the flat frame surviving until the 400 ms sweep) and are
+# eyeballed by the monitor either way.
+TRANS_BURST_SHOTS = 4
+TRANS_BURST_INTERVAL_S = 0.12
+
 
 def log(msg):
     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
@@ -1299,6 +1311,149 @@ def detect_lens_in_shots(mid_paths, ref_path):
     return seen, round(dark, 1), zone, shot
 
 
+def _row_mean_lum(png, y, x_ranges):
+    """Mean luminance of one screenshot row (logical 720x1280
+    coordinates), sampled over x_ranges — the columns BETWEEN the tab
+    icons, so no icon pixels pollute the reading. Returns None when
+    the row is empty."""
+    width, height, ch, px = png
+    sx = width / 720.0
+    sy = height / 1280.0
+    yy = int(y * sy)
+    if yy < 0 or yy >= height:
+        return None
+    total = 0.0
+    n = 0
+    base = yy * width * ch
+    for x0, x1 in x_ranges:
+        for x in range(max(0, int(x0 * sx)), min(width, int(x1 * sx)), 2):
+            o = base + x * ch
+            total += 0.299 * px[o] + 0.587 * px[o + 1] + 0.114 * px[o + 2]
+            n += 1
+    return total / n if n else None
+
+
+def detect_flat_bar_frame(path):
+    """Is the bottom bar in this shot the glass capsule or the flat
+    background frame Instagram's bar controller repaints on page
+    switches (1.19 capsule flash)?
+
+    The capsule is a translucent vertical gradient pill, so four rows
+    across it (y=1082/1120/1158/1166, between the icons) always
+    differ from each other; a flat repaint is one solid colour, so
+    all four rows read identical. Measured on the real 1.18 probe
+    shots (capsule, good): row spreads 35-44; on a synthetic flat
+    frame (the feed shot with the bar strip painted solid #121212):
+    spread exactly 0.0. Thresholds sit in the gap: spread < 5
+    -> 'flat', 5-15 -> 'unclear', >= 15 -> 'capsule'. A stock bar
+    background with its own strong gradient could read 'capsule'
+    (false negative) — the burst shots are eyeballed by the monitor
+    as the backstop, and the pre-draw guard's logcat lines are the
+    primary evidence either way. Returns (verdict, evidence dict)."""
+    png = _png_pixels(path)
+    if png is None:
+        return "unclear", {}
+    xs = [(130, 195), (260, 330), (390, 460), (520, 585)]
+    rows = [_row_mean_lum(png, y, xs) for y in (1082, 1120, 1158, 1166)]
+    if any(v is None for v in rows):
+        return "unclear", {}
+    spread = max(rows) - min(rows)
+    ev = {"spread": round(spread, 1),
+          "rows": [round(v, 1) for v in rows]}
+    if spread < 5.0:
+        return "flat", ev
+    if spread < 15.0:
+        return "unclear", ev
+    return "capsule", ev
+
+
+def run_transition_test():
+    """1.19 capsule-flash acceptance test: Home -> Reels -> Home
+    with rapid screenshot bursts DURING each switch, checking every
+    burst shot for the flat background frame (see
+    detect_flat_bar_frame). Runs between the 8-tap sequence and the
+    drag test (the sequence ends on Home, the drag test starts from
+    Home). Records STATUS['transition_test'] with the per-shot
+    verdicts plus the live count of pre-draw guard firings in
+    logcat — the guard is what prevents a 1-frame flash the burst
+    can miss, so its firings are evidence too. Returns the result
+    string."""
+    result = "TRANSITION_SKIPPED"
+    info = {"result": result, "shots": [], "guard_firings": 0}
+    try:
+        # Guard firings BEFORE the switches, so the count below is
+        # the delta during the transitions (not everything since
+        # launch, which includes the 8-tap sequence).
+        guard_before = 0
+        try:
+            out, _, _ = adb("logcat", "-d", timeout=90)
+            guard_before = out.count("capsule re-applied in pre-draw")
+        except Exception:
+            pass
+        nodes = parse_dump(dump("step_trans0"))
+        if nodes:
+            remember_tabs(nodes)
+        home = find_tab(nodes, "Home")
+        reels = find_tab(nodes, "Reels")
+        if ((not home or not reels) and "Home" in LAST_TABS
+                and "Reels" in LAST_TABS):
+            home = {"center": LAST_TABS["Home"]}
+            reels = {"center": LAST_TABS["Reels"]}
+            info["used_fallback_coords"] = True
+            log("transition test: UI dumps failing; using last-known "
+                "tab coordinates")
+        if not home or not reels:
+            log("transition test skipped: Home/Reels tab not found")
+            STATUS["transition_test"] = info
+            return result
+        for label, target in (("h2r", reels), ("r2h", home)):
+            x, y = target["center"]
+            log(f"transition test: tapping {label} at {(x, y)}")
+            # Direct input tap, NOT tap(): tap() sleeps 1 s, which
+            # would push the first burst shot past the whole
+            # ~200-400 ms switch. The burst must start immediately.
+            shell("input", "tap", str(x), str(y))
+            for i in range(TRANS_BURST_SHOTS):
+                time.sleep(TRANS_BURST_INTERVAL_S)
+                name = f"shot_trans_{label}_{i}"
+                screenshot(name)
+                verdict, ev = detect_flat_bar_frame(f"{name}.png")
+                info["shots"].append(
+                    {"name": f"{name}.png", "verdict": verdict, **ev})
+                log(f"transition {label} shot {i}: {verdict} "
+                    f"(spread {ev.get('spread')})")
+        # Let the switch settle back on Home before the drag test.
+        time.sleep(1.5)
+        try:
+            out, _, _ = adb("logcat", "-d", timeout=90)
+            info["guard_firings"] = (
+                out.count("capsule re-applied in pre-draw") - guard_before)
+            log(f"transition test: pre-draw guard fired "
+                f"{info['guard_firings']} time(s) during the switches")
+        except Exception as e:
+            log(f"transition test: guard count failed ({e})")
+        verdicts = [s["verdict"] for s in info["shots"]]
+        if "flat" in verdicts:
+            result = "FLAT_FRAME_SEEN"
+        elif "unclear" in verdicts:
+            result = "TRANSITION_UNCLEAR"
+        elif verdicts:
+            result = "NO_FLAT_FRAME"
+        else:
+            result = "TRANSITION_SKIPPED"
+        info["result"] = result
+        log(f"transition test: {result} "
+            f"({len(verdicts)} burst shots analysed)")
+        STATUS["transition_test"] = info
+    except Exception as e:
+        log(f"transition test error (non-fatal): {e}")
+        info["result"] = "TRANSITION_ERROR"
+        info["error"] = str(e)
+        STATUS["transition_test"] = info
+        result = "TRANSITION_ERROR"
+    return result
+
+
 def capture_drag_logcat():
     """Snapshot logcat IMMEDIATELY after the drag test, before the
     ~40 s after-dump retry loop: the 1.17.1 re-probe's final capture
@@ -1634,10 +1789,17 @@ def main():
             if not check_alive("8-tap tab sequence"):
                 return finish("CRASHED_AFTER_FEED",
                               "FATAL or dead process after tab sequence")
+            # 1.19 capsule-flash acceptance test (see
+            # run_transition_test): Home -> Reels -> Home bursts.
+            trans_result = run_transition_test()
+            if not check_alive("transition test"):
+                return finish("CRASHED_AFTER_FEED",
+                              "FATAL or dead process after transition test")
             # 1.13 drag-lens acceptance test (see run_drag_test).
             drag_result = run_drag_test()
             return finish("LOGGED_IN_FEED", "home feed + 8-tap sequence "
                           "captured (home/reels/direct/profile x2); "
+                          f"transition test: {trans_result}; "
                           f"drag test: {drag_result}")
         if state == "WRONG_PASSWORD":
             screenshot("shot_wrong_password")
