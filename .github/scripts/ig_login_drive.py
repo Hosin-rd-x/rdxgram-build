@@ -229,6 +229,22 @@ DEADLINE_MARGIN_SEC = 60   # no new phase starts in the last minute:
 NOTIF_SETTLE_SEC = 10      # feed settle after the dialog is dismissed
 NOTIF_SWIPE_MS = 300       # recovery swipe duration (scroll, not a tap)
 
+# Fix #10 (1.19.4 probe #3): repeat the recovery swipe until the
+# video is verifiably off-screen. Probe #3 proved one swipe is not
+# enough: it moved the feed only ~430 px, the video stayed fully in
+# view and still playing, and dumps kept failing even after the
+# video ENDED — so the single swipe never tested its own
+# hypothesis. A ~460 px tall top video post needs ~700 px of
+# cumulative scroll (two swipes at ~430 px each) to clear it.
+NOTIF_SWIPE_MAX = 3        # max up-swipes in the post-NOTIF recovery
+NOTIF_SWIPE_TARGET_PX = 700  # cumulative scroll that clears the top
+                             # video post, with margin (logical px)
+NOTIF_SCROLL_STEP_PX = 50  # estimator candidate step (logical px)
+NOTIF_SCROLL_MAX_PX = 1000  # estimator candidate ceiling (logical px)
+NOTIF_SCROLL_MIN_SAMPLES = 2000  # a candidate shift needs this many
+    # samples to count — the thin tail at large shifts would
+    # otherwise win on a handful of static rows
+
 
 def past_deadline(margin=0):
     """True when fewer than `margin` seconds remain before DEADLINE.
@@ -412,6 +428,11 @@ def clear_field(center):
     time.sleep(0.5)
 
 
+# Fix #10: the last failed dump()'s return code + stderr (see
+# dump()). Read by the monitor from the timeline; never a secret.
+LAST_DUMP_DIAG = {"rc": None, "stderr": ""}
+
+
 def dump(name):
     """Dump the UI hierarchy to ui_<name>.xml and return its path.
 
@@ -432,12 +453,19 @@ def dump(name):
     rm/pull calls are capped too, so one dump() call can never
     cost more than ~2 x (10 + 20 + 20 + 2) s."""
     path = f"ui_{name}.xml"
+    # Fix #10: the last failed dump's return code + stderr. Probe #3's
+    # verdict had to GUESS the failure mode (idle-wait timeout vs a
+    # fast connection error) because dump() discarded both. The diag
+    # is logged to the timeline when every attempt fails, so the next
+    # stuck run says which one it was.
+    last_rc, last_err = None, ""
     for _ in range(DUMP_ATTEMPTS):
         if os.path.exists(path):
             os.remove(path)
         shell("rm", "/sdcard/ui.xml", timeout=10)
-        shell("uiautomator", "dump", "/sdcard/ui.xml",
-              timeout=DUMP_SHELL_TIMEOUT)
+        _, err, rc = shell("uiautomator", "dump", "/sdcard/ui.xml",
+                           timeout=DUMP_SHELL_TIMEOUT)
+        last_rc, last_err = rc, err
         out, _, _ = adb("pull", "/sdcard/ui.xml", path, timeout=20)
         if os.path.exists(path) and os.path.getsize(path) > 100:
             try:
@@ -448,6 +476,11 @@ def dump(name):
                 continue
             return path
         time.sleep(2)
+    LAST_DUMP_DIAG["rc"] = last_rc
+    LAST_DUMP_DIAG["stderr"] = " ".join(
+        (last_err or "").split())[:200]
+    log(f"dump {name}: uiautomator dump failed (rc={last_rc}, "
+        f"stderr={LAST_DUMP_DIAG['stderr']!r})")
     return None
 
 
@@ -2299,6 +2332,75 @@ def run_drag_test():
 
 
 # --- Fix #9 (1.19.4 probes #1/#2): post-NOTIF dump recovery --------
+def _shot_scroll_px(before_path, after_path):
+    """Estimate how far the feed scrolled UP between two screenshots
+    (fix #10). Returns an int (logical 720x1280 px) or None.
+
+    Method: for each candidate shift S (0..NOTIF_SCROLL_MAX_PX in
+    NOTIF_SCROLL_STEP_PX steps) compare the AFTER rows y with the
+    BEFORE rows y+S over a fixed band (x 60..660, y 150..1100,
+    logical coords, sampled every 8th/4th pixel); the match rate is
+    the fraction of samples whose luminance differs by < 12. Static
+    regions (white background, text) match only at the true shift;
+    the playing video matches nowhere, so it dilutes the rate but
+    cannot create a false peak. Grounded on the real probe #3
+    shots: recovery->pixels peaks at S=450 (match 0.51 — one swipe
+    moved ~430 px by eye) and pixels->dump_stuck peaks at S=0
+    (match 0.68 — same scroll position). Candidates with fewer than
+    NOTIF_SCROLL_MIN_SAMPLES samples are skipped: the thin tail at
+    large shifts would otherwise win on a handful of static rows.
+    ~1 s per pair on the runner. Never raises: any decode/shape
+    problem returns None, and the caller then assumes the swipe
+    moved the feed (the old fix #9 behaviour)."""
+    try:
+        before = _png_pixels(before_path)
+        after = _png_pixels(after_path)
+        if before is None or after is None:
+            return None
+        for png in (before, after):
+            w, h, ch, px = png
+            if len(px) < w * h * ch:
+                return None
+        bw, bh, bch, bpx = before
+        aw, ah, ach, apx = after
+        bsx, bsy = bw / 720.0, bh / 1280.0
+        asx, asy = aw / 720.0, ah / 1280.0
+
+        best_s, best_rate = 0, -1.0
+        for s in range(0, NOTIF_SCROLL_MAX_PX + 1,
+                       NOTIF_SCROLL_STEP_PX):
+            match, n = 0, 0
+            for y in range(150, 1100, 4):
+                yb = int((y + s) * bsy)
+                if yb >= bh - 5:
+                    continue
+                ya = int(y * asy)
+                brow = yb * bw * bch
+                arow = ya * aw * ach
+                for x in range(60, 660, 8):
+                    xb = int(x * bsx)
+                    xa = int(x * asx)
+                    bo = brow + xb * bch
+                    ao = arow + xa * ach
+                    d = abs((0.299 * apx[ao] + 0.587 * apx[ao + 1]
+                             + 0.114 * apx[ao + 2])
+                            - (0.299 * bpx[bo] + 0.587 * bpx[bo + 1]
+                               + 0.114 * bpx[bo + 2]))
+                    n += 1
+                    if d < 12:
+                        match += 1
+            if n < NOTIF_SCROLL_MIN_SAMPLES:
+                continue
+            rate = match / n
+            if rate > best_rate:
+                best_s, best_rate = s, rate
+        if best_rate < 0:
+            return None
+        return best_s
+    except Exception:
+        return None
+
+
 def restart_uiautomator():
     """Kill any lingering on-device uiautomator processes (best-effort).
 
@@ -2385,21 +2487,29 @@ def record_pixel_fallback(png_path):
 
 def post_notif_recovery():
     """Recover UI dumps right after the notification dialog was
-    dismissed (fix #9). Runs ONCE per run, only when the dialog's
-    verification dump saw the feed loading (UNKNOWN) or the feed
-    itself — the 1.19.4 probes #1/#2 died here 2/2: the feed's
-    first item was a video post, its SurfaceView wedges
-    uiautomator, and every later dump failed while the video kept
-    playing. Waiting and relaunching cannot fix that (proven 2/2);
-    the video has to leave the viewport:
+    dismissed (fix #9, loop added by fix #10). Runs ONCE per run,
+    only when the dialog's verification dump saw the feed loading
+    (UNKNOWN) or the feed itself — the 1.19.4 probes #1/#2 died here
+    2/2: the feed's first item was a video post, its SurfaceView
+    wedges uiautomator, and every later dump failed while the video
+    kept playing. Waiting and relaunching cannot fix that (proven
+    2/2); the video has to leave the viewport:
       1. wait NOTIF_SETTLE_SEC for the feed to settle;
       2. screenshot FIRST (visual evidence whatever happens next);
       3. restart uiautomator (best-effort: a timed-out dump can
          leave a lingering process holding the UiAutomation
          connection) and retry one dump;
-      4. if that still fails, swipe UP once to scroll the top
-         (video) item off-screen, restart uiautomator again, and
-         retry one dump;
+      4. if that still fails, swipe UP repeatedly (fix #10) — after
+         EACH swipe take a screenshot, estimate how far the feed
+         actually scrolled with _shot_scroll_px(), restart
+         uiautomator and retry one dump. Stop early when the
+         cumulative scroll reaches NOTIF_SWIPE_TARGET_PX (the top
+         video is verifiably off-screen) or after NOTIF_SWIPE_MAX
+         swipes. Probe #3 proved one swipe is not enough: it moved
+         the feed only ~430 px and the video stayed fully in view.
+         An undecodable screenshot means the scroll is unknown, so
+         the loop keeps swiping (the old fix #9 behaviour) instead
+         of trusting a guess;
       5. if dumps still fail, take a post-swipe screenshot and
          record pixel evidence (see record_pixel_fallback) — the
          run stays DUMP_STUCK, but with evidence instead of only
@@ -2425,8 +2535,8 @@ def post_notif_recovery():
                 "settle + uiautomator restart (no swipe needed)")
             return nodes
         log("post-NOTIF recovery: dump still failing after the "
-            "settle; swiping up once to scroll the top item "
-            "(video) off-screen")
+            "settle; swiping up to scroll the top item (video) "
+            "off-screen")
         png = _png_pixels("shot_feed_recovery.png")
         if png is not None:
             w, h, _, _ = png
@@ -2435,18 +2545,45 @@ def post_notif_recovery():
             y1 = int(h * 0.31)
         else:
             x, y0, y1 = 360, 900, 400
-        shell("input", "swipe", str(x), str(y0), str(x), str(y1),
-              str(NOTIF_SWIPE_MS))
-        time.sleep(3)
-        restart_uiautomator()
-        path = dump("step_notif_rec2")
-        nodes = parse_dump(path)
-        if nodes:
-            log("post-NOTIF recovery: dump restored after the "
-                "recovery swipe")
-            return nodes
+        prev_shot = "shot_feed_recovery.png"
+        scrolled = 0
+        for attempt in range(1, NOTIF_SWIPE_MAX + 1):
+            log(f"post-NOTIF recovery: swipe {attempt}/"
+                f"{NOTIF_SWIPE_MAX} (scrolled so far ~{scrolled}px)")
+            shell("input", "swipe", str(x), str(y0), str(x), str(y1),
+                  str(NOTIF_SWIPE_MS))
+            time.sleep(3)
+            shot = f"shot_feed_recovery{attempt}"
+            if screenshot(shot):
+                moved = _shot_scroll_px(prev_shot, f"{shot}.png")
+                if moved is None:
+                    log("post-NOTIF recovery: scroll estimate "
+                        "unavailable (undecodable shot); assuming "
+                        "the swipe moved the feed")
+                else:
+                    scrolled += moved
+                    log(f"post-NOTIF recovery: swipe {attempt} "
+                        f"moved the feed ~{moved}px (cumulative "
+                        f"~{scrolled}px)")
+                prev_shot = f"{shot}.png"
+            else:
+                log("post-NOTIF recovery: post-swipe screenshot "
+                    "failed; assuming the swipe moved the feed")
+            restart_uiautomator()
+            path = dump(f"step_notif_rec{attempt + 1}")
+            nodes = parse_dump(path)
+            if nodes:
+                log("post-NOTIF recovery: dump restored after "
+                    f"{attempt} swipe(s) (~{scrolled}px scrolled)")
+                return nodes
+            if scrolled >= NOTIF_SWIPE_TARGET_PX:
+                log("post-NOTIF recovery: scrolled "
+                    f"~{scrolled}px (>= {NOTIF_SWIPE_TARGET_PX}px "
+                    "target) — the top video is off-screen, but "
+                    "dumps still fail; no more swipes")
+                break
         log("post-NOTIF recovery: dumps still failing after the "
-            "swipe; recording pixel evidence from a fresh shot")
+            "swipes; recording pixel evidence from a fresh shot")
         if screenshot("shot_feed_pixels"):
             record_pixel_fallback("shot_feed_pixels.png")
         return None
